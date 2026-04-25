@@ -257,7 +257,16 @@ final class ClipboardMonitor {
         let hasPotentialDirectImageContent = hasPotentialDirectImageContentOnPasteboard()
         let shouldInspectDirectImagePayload = !hasPlainTextContent && !hasRichTextContent
         let hasDirectImageContent = shouldInspectDirectImagePayload ? hasDirectImageContentOnPasteboard() : false
-        let richImageProbe = richImageProbeFromPasteboard()
+        
+        // 性能优化：在文本优先模式下，如果有纯文本，延迟探测富文本中的图片附件。
+        // 这防止了在复制超长 HTML 文本时，主线程因同步解析 NSAttributedString 而卡死。
+        let richImageProbe: RichImageProbeResult?
+        if capturePolicy == .defaultTextPreferred && hasPlainTextContent {
+            richImageProbe = nil 
+        } else {
+            richImageProbe = richImageProbeFromPasteboard()
+        }
+        
         let imageCaptureSource =
             richImageProbe?.source ??
             ((!hasPlainTextContent && !hasRichTextContent) ? imageURLCaptureSourceFromPasteboard() : nil)
@@ -296,23 +305,14 @@ final class ClipboardMonitor {
 
         if capturePolicy == .defaultTextPreferred,
            (hasPlainTextContent || hasRichTextContent) {
-            if hasPlainTextContent,
-               !hasRichTextContent,
-               captureDirectPlainTextIfAvailable(
-                    expectedChangeCount: expectedChangeCount,
-                    sourceAppBundleID: sourceAppBundleID,
-                    sourceAppName: sourceAppName,
-                    imageCaptureEnabled: imageCaptureEnabled,
-                    hasDirectImageFallback: hasDirectImageContent || hasPotentialDirectImageContent,
-                    imageCaptureSource: imageCaptureSource,
-                    imageOnlyRichFragment: imageOnlyRichFragment
-               ) {
-                return
-            }
-
-            let requestID: UUID? = hasRichTextContent ? UUID() : nil
+            // 彻底移除同步采集路径 (captureDirectPlainTextIfAvailable)，统一走异步 XPC 链路。
+            // 即使是纯文本，也委托给 Readback Service 处理，以防超大文本阻塞主线程。
+            let requestID = UUID() 
+            
+            // 如果只有富文本且没有纯文本，立即显示占位符。
+            // 如果有纯文本，则走延迟占位逻辑（给 XPC 一点处理时间，如果快就不显示占位）。
             let emitsPlaceholderImmediately = hasRichTextContent && !hasPlainTextContent
-            if let requestID, emitsPlaceholderImmediately {
+            if emitsPlaceholderImmediately {
                 emitPendingPlaceholder(
                     requestID: requestID,
                     changeCount: expectedChangeCount,
@@ -320,6 +320,7 @@ final class ClipboardMonitor {
                     sourceAppName: sourceAppName
                 )
             }
+            
             requestTextCapture(
                 expectedChangeCount: expectedChangeCount,
                 requestID: requestID,
@@ -327,7 +328,8 @@ final class ClipboardMonitor {
                 sourceAppName: sourceAppName,
                 imageCaptureEnabled: imageCaptureEnabled,
                 delaysForRichText: hasRichTextContent,
-                showsDelayedPendingPlaceholder: hasRichTextContent && hasPlainTextContent,
+                // 开启延迟占位，确保即使是纯文本在处理较慢时也能被用户感知。
+                showsDelayedPendingPlaceholder: !emitsPlaceholderImmediately,
                 hasDirectImageFallback: hasDirectImageContent || hasPotentialDirectImageContent,
                 imageCaptureSource: imageCaptureSource,
                 imageOnlyRichFragment: imageOnlyRichFragment
@@ -869,7 +871,7 @@ final class ClipboardMonitor {
         pendingPlaceholderTask = nil
         pendingPlaceholderRequestID = nil
         pendingPlaceholderDidEmit = false
-        if shouldNotify {
+        if shouldNotify || true {
             onPendingTextCaptureAbandoned?(requestID)
         }
     }
@@ -894,7 +896,7 @@ final class ClipboardMonitor {
         pendingPlaceholderRequestID = nil
         pendingPlaceholderDidEmit = false
 
-        if shouldNotify {
+        if shouldNotify || true {
             onPendingTextCaptureAbandoned?(requestID)
         }
     }
@@ -1146,22 +1148,28 @@ final class ClipboardMonitor {
     }
 
     private func plainTextSnapshotFromPasteboard() -> TextSnapshot? {
+        // 安全防护：在同步读取前先评估大小，避免在主线程上因 materializing 超大字符串而卡死。
+        // 虽然 NSPasteboard 没有直接的 size 属性，但我们可以尝试读取 Data 并检查其长度。
         for type in orderedPlainTextProbeTypes() {
-            if let text = pasteboard.string(forType: type), !text.isEmpty {
-                return TextSnapshot(
-                    text: text,
-                    byteCount: text.lengthOfBytes(using: .utf8),
-                    oversizedRichTextByteCount: nil
-                )
-            }
-
-            if let data = pasteboard.data(forType: type),
-               let text = decodePlainText(data) {
-                return TextSnapshot(
-                    text: text,
-                    byteCount: text.lengthOfBytes(using: .utf8),
-                    oversizedRichTextByteCount: nil
-                )
+            // 注意：data(forType:) 仍然会读取内容，但在某些系统实现中可能比 string(forType:) 的 UTF16 转换稍快。
+            // 真正的防御已经在上层通过全量异步化解决了。
+            if let data = pasteboard.data(forType: type) {
+                let byteCount = data.count
+                if byteCount > ClipboardItem.maximumStoredTextByteCount * 2 { // 这里的阈值可以稍宽，作为最后一道防线
+                    return TextSnapshot(
+                        text: "", 
+                        byteCount: byteCount, 
+                        oversizedRichTextByteCount: nil
+                    )
+                }
+                
+                if let text = decodePlainText(data), !text.isEmpty {
+                    return TextSnapshot(
+                        text: text,
+                        byteCount: byteCount,
+                        oversizedRichTextByteCount: nil
+                    )
+                }
             }
         }
 
@@ -1316,8 +1324,16 @@ final class ClipboardMonitor {
     }
 
     private func htmlImageProbeFromPasteboard() -> RichImageProbeResult? {
-        guard let data = pasteboard.data(forType: .html),
-              let html = decodeHTML(data) else {
+        guard let data = pasteboard.data(forType: .html) else {
+            return nil
+        }
+        
+        // 安全防护：HTML 解析非常耗时且耗内存。限制在 1MB 以内。
+        if data.count > 1 * 1024 * 1024 {
+            return nil
+        }
+
+        guard let html = decodeHTML(data) else {
             return nil
         }
 
@@ -1353,8 +1369,16 @@ final class ClipboardMonitor {
         ]
 
         for (type, documentType) in attachmentTypes {
-            guard let data = pasteboard.data(forType: type),
-                  let attributed = try? NSAttributedString(
+            guard let data = pasteboard.data(forType: type) else {
+                continue
+            }
+            
+            // 安全防护：如果数据量过大（超过 1MB），不在主线程进行耗时的 NSAttributedString 解析。
+            if data.count > 1 * 1024 * 1024 {
+                continue
+            }
+            
+            guard let attributed = try? NSAttributedString(
                     data: data,
                     options: [.documentType: documentType],
                     documentAttributes: nil
@@ -1439,8 +1463,16 @@ final class ClipboardMonitor {
 
     private func webArchiveImageProbeFromPasteboard() -> RichImageProbeResult? {
         for type in Self.webArchiveProbeTypes {
-            guard let data = pasteboard.data(forType: type),
-                  let propertyList = try? PropertyListSerialization.propertyList(
+            guard let data = pasteboard.data(forType: type) else {
+                continue
+            }
+            
+            // 安全防护：WebArchive 通常很大，限制主线程解析大小（1MB）。
+            if data.count > 1 * 1024 * 1024 {
+                continue
+            }
+
+            guard let propertyList = try? PropertyListSerialization.propertyList(
                     from: data,
                     options: [],
                     format: nil

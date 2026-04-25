@@ -137,6 +137,25 @@ final class ClipboardReadbackService: NSObject, NSXPCListenerDelegate, Clipboard
 
             do {
                 let request = try self.decoder.decode(ClipboardReadbackRequest.self, from: requestData)
+                
+                // 前置检查：如果进入队列时已经发现 changeCount 不一致，直接返回 stale。
+                let currentChangeCount = self.getPasteboardChangeCount()
+                if currentChangeCount != request.expectedChangeCount {
+                    let response = ClipboardReadbackResponse(
+                        requestID: request.requestID,
+                        expectedChangeCount: request.expectedChangeCount,
+                        outcome: .stale,
+                        text: nil,
+                        previewText: nil,
+                        byteCount: nil,
+                        cacheToken: nil,
+                        errorMessage: nil
+                    )
+                    let responseData = try self.encoder.encode(response)
+                    reply(responseData, nil)
+                    return
+                }
+
                 let response = try self.makeResponse(for: request)
                 let responseData = try self.encoder.encode(response)
                 reply(responseData, nil)
@@ -231,6 +250,21 @@ final class ClipboardReadbackService: NSObject, NSXPCListenerDelegate, Clipboard
     }
 
     private func makeResponse(for request: ClipboardReadbackRequest) throws -> ClipboardReadbackResponse {
+        // 在正式进行可能耗时的 snapshot 动作前，最后进行一次极速检查。
+        let currentCount = getPasteboardChangeCount()
+        guard currentCount == request.expectedChangeCount else {
+            return ClipboardReadbackResponse(
+                requestID: request.requestID,
+                expectedChangeCount: request.expectedChangeCount,
+                outcome: .stale,
+                text: nil,
+                previewText: nil,
+                byteCount: nil,
+                cacheToken: nil,
+                errorMessage: nil
+            )
+        }
+
         let snapshot = snapshotPlainText()
         guard snapshot.changeCount == request.expectedChangeCount else {
             return ClipboardReadbackResponse(
@@ -530,6 +564,12 @@ final class ClipboardReadbackService: NSObject, NSXPCListenerDelegate, Clipboard
             return 0.18
         default:
             return 0.10
+        }
+    }
+
+    private func getPasteboardChangeCount() -> Int {
+        performOnMainThread {
+            NSPasteboard.general.changeCount
         }
     }
 

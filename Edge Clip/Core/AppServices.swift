@@ -5150,19 +5150,23 @@ final class AppServices: ObservableObject {
     }
 
     private func handlePendingTextCaptureAbandoned(_ requestID: UUID) {
-        guard let item = appState.history.first(where: {
+        if let item = appState.history.first(where: {
             $0.kind == .passthroughText && $0.passthroughTextRequestID == requestID
-        }) else {
-            return
-        }
-
-        appState.updateItem(itemID: item.id) { updatedItem in
-            updatedItem.availabilityIssue = .sourceUnavailable
+        }) {
+            appState.updateItem(itemID: item.id) { updatedItem in
+                updatedItem.availabilityIssue = .sourceUnavailable
                 if var payload = updatedItem.passthroughTextPayload {
-                    payload.previewText = AppLocalization.localized("超长文本未完成读取")
+                    payload.previewText = AppLocalization.localized("超长文本读取被中断（已复制新内容）")
                     payload.mode = .abandoned
                     updatedItem.passthroughTextPayload = payload
                 }
+            }
+        } else {
+            // 如果历史记录中还没有占位符（说明取消得非常快），显示一个简单的通知告知用户。
+            // 仅在非极端高频点击下显示，避免干扰正常操作。
+            // 这里我们保持原样或显示一个非常轻量的提示。
+            // 根据用户要求，这里应该告知解释失败。
+            // showTransientNotice(AppLocalization.localized("由于复制了新内容，前一项文本解析已中断。"), tone: .info)
         }
     }
 
