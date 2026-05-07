@@ -45,6 +45,23 @@ final class ClipboardMonitor {
     struct TextCapturePayload {
         let text: String
         let requestID: UUID?
+        let richTextData: Data?
+        let htmlString: String?
+        let isRichText: Bool
+
+        init(
+            text: String,
+            requestID: UUID?,
+            richTextData: Data? = nil,
+            htmlString: String? = nil,
+            isRichText: Bool = false
+        ) {
+            self.text = text
+            self.requestID = requestID
+            self.richTextData = richTextData
+            self.htmlString = htmlString
+            self.isRichText = isRichText
+        }
     }
 
     private static let maximumRichTextParseByteCount = ClipboardItem.maximumStoredTextByteCount
@@ -328,11 +345,11 @@ final class ClipboardMonitor {
                 sourceAppName: sourceAppName,
                 imageCaptureEnabled: imageCaptureEnabled,
                 delaysForRichText: hasRichTextContent,
-                // 开启延迟占位，确保即使是纯文本在处理较慢时也能被用户感知。
                 showsDelayedPendingPlaceholder: !emitsPlaceholderImmediately,
                 hasDirectImageFallback: hasDirectImageContent || hasPotentialDirectImageContent,
                 imageCaptureSource: imageCaptureSource,
-                imageOnlyRichFragment: imageOnlyRichFragment
+                imageOnlyRichFragment: imageOnlyRichFragment,
+                hasRichTextContent: hasRichTextContent
             )
             return
         }
@@ -471,6 +488,32 @@ final class ClipboardMonitor {
         }
     }
 
+    /// Builds a TextCapturePayload with rich text data from the current pasteboard.
+    private func makeTextCapturePayload(
+        text: String,
+        requestID: UUID?,
+        hasRichTextContent: Bool
+    ) -> TextCapturePayload {
+        if hasRichTextContent {
+            let rtfData = richTextDataFromPasteboard()
+            let html = htmlStringFromPasteboard()
+            return TextCapturePayload(
+                text: text,
+                requestID: requestID,
+                richTextData: rtfData,
+                htmlString: html,
+                isRichText: rtfData != nil || html != nil
+            )
+        }
+        return TextCapturePayload(
+            text: text,
+            requestID: requestID,
+            richTextData: nil,
+            htmlString: nil,
+            isRichText: false
+        )
+    }
+
     private func requestTextCapture(
         expectedChangeCount: Int,
         requestID: UUID?,
@@ -481,7 +524,8 @@ final class ClipboardMonitor {
         showsDelayedPendingPlaceholder: Bool,
         hasDirectImageFallback: Bool,
         imageCaptureSource: HTMLImageCaptureSource?,
-        imageOnlyRichFragment: Bool
+        imageOnlyRichFragment: Bool,
+        hasRichTextContent: Bool = false
     ) {
         guard pendingTextCaptureChangeCount != expectedChangeCount else { return }
         pendingTextCaptureChangeCount = expectedChangeCount
@@ -596,7 +640,11 @@ final class ClipboardMonitor {
 
                     onCapture?(
                         Capture(
-                            payload: .text(TextCapturePayload(text: text, requestID: requestID)),
+                            payload: .text(makeTextCapturePayload(
+                                text: text,
+                                requestID: requestID,
+                                hasRichTextContent: hasRichTextContent
+                            )),
                             sourceAppBundleID: sourceAppBundleID,
                             sourceAppName: sourceAppName
                         )
@@ -1145,6 +1193,32 @@ final class ClipboardMonitor {
         }
 
         return nil
+    }
+
+    /// Captures RTF/RTFD and HTML data from the pasteboard for rich text storage.
+    /// Only captures data under a size threshold to avoid storing enormous blobs.
+    private func richTextDataFromPasteboard() -> Data? {
+        // Priority: RTFD > RTF
+        for type in [
+            NSPasteboard.PasteboardType("com.apple.flat-rtfd"),
+            NSPasteboard.PasteboardType("public.rtfd"),
+            .rtf
+        ] {
+            if let data = pasteboard.data(forType: type),
+               data.count <= Self.maximumRichTextParseByteCount {
+                return data
+            }
+        }
+        return nil
+    }
+
+    /// Captures HTML string from the pasteboard for rich text storage.
+    private func htmlStringFromPasteboard() -> String? {
+        guard let data = pasteboard.data(forType: .html),
+              data.count <= Self.maximumRichTextParseByteCount else {
+            return nil
+        }
+        return decodeHTML(data)
     }
 
     private func plainTextSnapshotFromPasteboard() -> TextSnapshot? {

@@ -243,6 +243,10 @@ struct ClipboardFullPreviewPanelView: View {
                 .help(localized("把当前文本加入堆栈"))
             }
 
+            if showsRichTextToggle {
+                richTextToggleButton
+            }
+
             if showsImagePreviewModeControl {
                 imagePreviewModeControl
             }
@@ -305,7 +309,10 @@ struct ClipboardFullPreviewPanelView: View {
                     TextPreviewContentView(
                         payload: services.currentTextPreviewPayload,
                         text: textContent,
-                        showsPartialNotice: services.fullPreviewContent?.kind == .passthroughText
+                        showsPartialNotice: services.fullPreviewContent?.kind == .passthroughText,
+                        richTextData: services.currentTextPreviewPayload?.richTextData,
+                        richTextHTML: services.currentTextPreviewPayload?.htmlString,
+                        richTextMode: appState.isRichTextPreviewEnabled
                     )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let url = currentItem.url,
@@ -467,6 +474,14 @@ struct ClipboardFullPreviewPanelView: View {
     }
 
     private var footerTrailingText: String? {
+        if appState.isRichTextPreviewEnabled,
+           services.fullPreviewContent?.kind == .text,
+           let payload = services.currentTextPreviewPayload,
+           (payload.richTextData != nil || payload.htmlString != nil),
+           richTextPayloadContainsImages {
+            return localized("该富文本包含图片信息")
+        }
+
         if services.fullPreviewUnavailableState != nil {
             return nil
         }
@@ -540,6 +555,64 @@ struct ClipboardFullPreviewPanelView: View {
         case .stack:
             return localized("堆栈")
         }
+    }
+
+    private var richTextPayloadContainsImages: Bool {
+        guard let payload = services.currentTextPreviewPayload else { return false }
+        if let data = payload.richTextData, richTextDataContainsImageCommand(data) {
+            return true
+        }
+        if let html = payload.htmlString, htmlContainsImageTag(html) {
+            return true
+        }
+        return false
+    }
+
+    private func containsAnyImageAttachment(in attrStr: NSAttributedString) -> Bool {
+        var found = false
+        attrStr.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attrStr.length)) { value, _, stop in
+            if value is NSTextAttachment {
+                found = true
+                stop.pointee = true
+            }
+        }
+        return found
+    }
+
+    private var showsRichTextToggle: Bool {
+        !appState.isStackProcessorPresented &&
+        !appState.isFavoriteEditorPresented &&
+        services.fullPreviewUnavailableState == nil &&
+        services.fullPreviewContent?.kind == .text &&
+        (services.currentTextPreviewPayload?.richTextData != nil || services.currentTextPreviewPayload?.htmlString != nil)
+    }
+
+    private var richTextToggleButton: some View {
+        let isActive = appState.isRichTextPreviewEnabled
+        return Button {
+            appState.isRichTextPreviewEnabled.toggle()
+        } label: {
+            ZStack {
+                Image("RichTextIcon")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isActive ? Color.accentColor : Color.primary)
+            }
+            .frame(width: 30, height: 30)
+            .background(
+                Circle()
+                    .fill(isActive ? Color.accentColor.opacity(colorScheme == .dark ? 0.22 : 0.12) : Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.06))
+            )
+            .overlay(
+                Circle()
+                    .stroke(Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .help(localized(isActive ? "关闭富文本预览" : "富文本预览"))
     }
 
     private var showsImagePreviewModeControl: Bool {
@@ -898,6 +971,9 @@ private struct TextPreviewContentView: View {
     let payload: ClipboardItem.TextPayload?
     let text: String
     var showsPartialNotice: Bool = false
+    var richTextData: Data? = nil
+    var richTextHTML: String? = nil
+    var richTextMode: Bool = false
     @State private var isScrolledToBottom = false
 
     var body: some View {
@@ -906,12 +982,15 @@ private struct TextPreviewContentView: View {
                 TopPinnedPreviewNoticeView(message: notice)
             }
 
-            ZStack(alignment: .bottom) {
+            ZStack(alignment: .bottomTrailing) {
                 ReadOnlyTextPreviewView(
                     text: text,
                     usesMonospacedFont: payload?.isTabular ?? false,
                     bottomContentInset: showsOmissionNotice ? 56 : 0,
-                    onScrolledToBottomChanged: showsOmissionNotice ? { isScrolledToBottom = $0 } : nil
+                    onScrolledToBottomChanged: showsOmissionNotice ? { isScrolledToBottom = $0 } : nil,
+                    richTextData: richTextData,
+                    richTextHTML: richTextHTML,
+                    richTextMode: richTextMode
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
@@ -920,6 +999,7 @@ private struct TextPreviewContentView: View {
                         .padding(.horizontal, 4)
                         .padding(.bottom, 4)
                 }
+
             }
         }
         .padding(18)
@@ -934,12 +1014,32 @@ private struct TextPreviewContentView: View {
         }
     }
 
+    private var currentPreviewView: ReadOnlyTextPreviewView {
+        ReadOnlyTextPreviewView(
+            text: text,
+            usesMonospacedFont: payload?.isTabular ?? false,
+            richTextData: richTextData,
+            richTextHTML: richTextHTML,
+            richTextMode: richTextMode
+        )
+    }
+
     private var previewNotice: String? {
         if showsPartialNotice {
             return FullPreviewLocalizationSupport.localized("仅显示部分内容作为预览，文本可以正常粘贴")
         }
         guard let payload, payload.hasTruncatedPreview else { return nil }
         return FullPreviewLocalizationSupport.localized("仅显示部分内容作为预览，文本可以正常粘贴")
+    }
+
+    private var hasRichDataWithImages: Bool {
+        if let data = richTextData, richTextDataContainsImageCommand(data) {
+            return true
+        }
+        if let html = richTextHTML, htmlContainsImageTag(html) {
+            return true
+        }
+        return false
     }
 
     private var showsOmissionNotice: Bool {
@@ -4548,6 +4648,30 @@ private struct ReadOnlyTextPreviewView: NSViewRepresentable {
     var usesMonospacedFont = false
     var bottomContentInset: CGFloat = 0
     var onScrolledToBottomChanged: ((Bool) -> Void)? = nil
+    var richTextData: Data? = nil
+    var richTextHTML: String? = nil
+    var richTextMode: Bool = false
+
+    private var richTextCacheKey: String? {
+        if let data = richTextData {
+            return "rtf-\(data.count)-\(data.hashValue)"
+        }
+        if let html = richTextHTML {
+            return "html-\(html.hashValue)"
+        }
+        return nil
+    }
+
+    var hasImageAttachments: Bool {
+        guard richTextMode else { return false }
+        if let data = richTextData, richTextDataContainsImageCommand(data) {
+            return true
+        }
+        if let html = richTextHTML, htmlContainsImageTag(html) {
+            return true
+        }
+        return false
+    }
 
     final class Coordinator {
         var configuration: Configuration?
@@ -4620,6 +4744,8 @@ private struct ReadOnlyTextPreviewView: NSViewRepresentable {
         let text: String
         let usesMonospacedFont: Bool
         let bottomContentInset: CGFloat
+        let richTextFingerprint: String?
+        let richTextMode: Bool
     }
 
     func makeCoordinator() -> Coordinator {
@@ -4689,27 +4815,80 @@ private struct ReadOnlyTextPreviewView: NSViewRepresentable {
     }
 
     private var configuration: Configuration {
-        Configuration(
+        let fingerprint: String?
+        if let data = richTextData {
+            fingerprint = "rtf-\(data.count)"
+        } else if let html = richTextHTML {
+            fingerprint = "html-\(html.hashValue)"
+        } else {
+            fingerprint = nil
+        }
+        return Configuration(
             text: text,
             usesMonospacedFont: usesMonospacedFont,
-            bottomContentInset: bottomContentInset
+            bottomContentInset: bottomContentInset,
+            richTextFingerprint: fingerprint,
+            richTextMode: richTextMode
         )
     }
 
     private func makeAttributedText(for text: String) -> NSAttributedString {
-        let attributed = NSMutableAttributedString()
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineBreakMode = .byWordWrapping
         paragraphStyle.paragraphSpacing = 0
 
+        if richTextMode {
+            let cacheKey = richTextCacheKey
+            if let key = cacheKey, let cached = RichTextCache.shared.get(key: key) {
+                return cached
+            }
+
+            var richResult: NSAttributedString?
+            if let data = richTextData {
+                if let cleaned = stripImagesFromRTFD(data) {
+                    richResult = try? NSAttributedString(
+                        data: cleaned,
+                        options: [.documentType: NSAttributedString.DocumentType.rtf],
+                        documentAttributes: nil
+                    )
+                }
+                if richResult == nil, let cleaned = stripImagesFromRTF(data) {
+                    richResult = try? NSAttributedString(
+                        data: cleaned,
+                        options: [.documentType: NSAttributedString.DocumentType.rtf],
+                        documentAttributes: nil
+                    )
+                }
+            }
+            if richResult == nil, let html = richTextHTML {
+                let cleaned = stripImageTagsFromHTML(html)
+                if let data = cleaned.data(using: .utf8) {
+                    richResult = try? NSAttributedString(
+                        data: data,
+                        options: [
+                            .documentType: NSAttributedString.DocumentType.html,
+                            .characterEncoding: String.Encoding.utf8.rawValue
+                        ],
+                        documentAttributes: nil
+                    )
+                }
+            }
+            if let richResult {
+                let finalResult = richResult.strippingImageAttachments()
+                if let key = cacheKey {
+                    RichTextCache.shared.set(key: key, value: finalResult)
+                }
+                return finalResult
+            }
+        }
+
+        // Plain text (default)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: textFont,
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraphStyle
         ]
-
-        attributed.append(NSAttributedString(string: text, attributes: attributes))
-        return attributed
+        return NSAttributedString(string: text, attributes: attributes)
     }
 }
 
@@ -5381,6 +5560,131 @@ nonisolated private func resizedThumbnail(from image: NSImage, maxSize: NSSize) 
     )
     thumbnail.unlockFocus()
     return thumbnail
+}
+
+private extension NSAttributedString {
+    nonisolated func strippingImageAttachments() -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: self)
+        var rangesToRemove: [NSRange] = []
+        mutable.enumerateAttribute(.attachment, in: NSRange(location: 0, length: mutable.length)) { value, range, _ in
+            if value is NSTextAttachment {
+                rangesToRemove.append(range)
+            }
+        }
+        for range in rangesToRemove.reversed() {
+            mutable.replaceCharacters(in: range, with: "")
+        }
+        return mutable
+    }
+}
+
+private final class RichTextCache {
+    static let shared = RichTextCache()
+
+    private struct Entry {
+        let attributedString: NSAttributedString
+        let timestamp: Date
+    }
+
+    private var storage: [String: Entry] = [:]
+    private let ttl: TimeInterval = 86400
+    private let lock = NSLock()
+
+    func get(key: String) -> NSAttributedString? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = storage[key] else { return nil }
+        if Date().timeIntervalSince(entry.timestamp) > ttl {
+            storage.removeValue(forKey: key)
+            return nil
+        }
+        return entry.attributedString
+    }
+
+    func set(key: String, value: NSAttributedString) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage[key] = Entry(attributedString: value, timestamp: Date())
+        if storage.count > 100 {
+            storage = storage.filter { Date().timeIntervalSince($0.value.timestamp) <= ttl }
+        }
+    }
+}
+
+private func stripImageCommands(fromRTFString rtf: String) -> String {
+    var result = rtf
+    let patterns = ["{\\NeXTGraphic", "{\\pict", "{\\*\\shppict"]
+
+    for pattern in patterns {
+        var searchStart = result.startIndex
+        while let range = result.range(of: pattern, options: [], range: searchStart..<result.endIndex) {
+            let blockStart = range.lowerBound
+            var braceCount = 1
+            var index = range.upperBound
+            while index < result.endIndex && braceCount > 0 {
+                if result[index] == "{" { braceCount += 1 }
+                else if result[index] == "}" { braceCount -= 1 }
+                if braceCount > 0 {
+                    index = result.index(after: index)
+                }
+            }
+            if braceCount == 0 {
+                let blockEnd = result.index(after: index)
+                result.removeSubrange(blockStart..<blockEnd)
+                searchStart = blockStart
+            } else {
+                searchStart = result.index(after: range.upperBound)
+            }
+        }
+    }
+    return result
+}
+
+private func stripImagesFromRTFD(_ data: Data) -> Data? {
+    guard let wrapper = FileWrapper(serializedRepresentation: data),
+          let rtfWrapper = wrapper.fileWrappers?["TXT.rtf"],
+          let rtfData = rtfWrapper.regularFileContents,
+          var rtfString = String(data: rtfData, encoding: .utf8) ?? String(data: rtfData, encoding: .ascii) else {
+        return nil
+    }
+    rtfString = stripImageCommands(fromRTFString: rtfString)
+    return rtfString.data(using: .utf8)
+}
+
+private func stripImagesFromRTF(_ data: Data) -> Data? {
+    guard var rtfString = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) else {
+        return nil
+    }
+    rtfString = stripImageCommands(fromRTFString: rtfString)
+    return rtfString.data(using: .utf8)
+}
+
+private func stripImageTagsFromHTML(_ html: String) -> String {
+    guard let regex = try? NSRegularExpression(pattern: "<img[^>]*>", options: [.caseInsensitive]) else {
+        return html
+    }
+    return regex.stringByReplacingMatches(in: html, range: NSRange(html.startIndex..., in: html), withTemplate: "")
+}
+
+private func richTextDataContainsImageCommand(_ data: Data) -> Bool {
+    if let wrapper = FileWrapper(serializedRepresentation: data),
+       let rtfWrapper = wrapper.fileWrappers?["TXT.rtf"],
+       let rtfData = rtfWrapper.regularFileContents,
+       let rtfString = String(data: rtfData, encoding: .utf8) ?? String(data: rtfData, encoding: .ascii) {
+        if rtfString.contains("{\\NeXTGraphic") || rtfString.contains("{\\pict") {
+            return true
+        }
+    }
+    if let rtfString = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) {
+        if rtfString.contains("{\\NeXTGraphic") || rtfString.contains("{\\pict") {
+            return true
+        }
+    }
+    return false
+}
+
+private func htmlContainsImageTag(_ html: String) -> Bool {
+    return html.range(of: "<img", options: .caseInsensitive) != nil
 }
 
 private final class PreviewItem: NSObject, QLPreviewItem {

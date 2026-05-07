@@ -85,6 +85,7 @@ enum RightDragHeaderTarget: Equatable {
     case search
     case favoriteAdd
     case stack
+    case pasteFormat
     case pin
 }
 
@@ -185,6 +186,7 @@ final class AppState: ObservableObject {
     @Published private(set) var panelPresentationID: Int = 0
     @Published private(set) var resolvedAppLanguage: AppResolvedLanguage = .english
     @Published private(set) var appLocaleIdentifier: String = AppResolvedLanguage.english.localeIdentifier
+    @Published private(set) var favoriteHistoryItems: [ClipboardItem] = []
 
     @Published var panelMode: PanelMode = .history
     @Published var activeTab: PanelTab = .all
@@ -207,6 +209,7 @@ final class AppState: ObservableObject {
     @Published var isStackProcessorPresented = false
     @Published var stackProcessorDraft = ""
     @Published var isFavoriteEditorPresented = false
+    @Published var isRichTextPreviewEnabled = false
     @Published var activeFavoriteSnippetID: FavoriteSnippet.ID?
     @Published var activeFavoriteGroupID: FavoriteGroup.ID?
     @Published var favoriteEditorDraft = ""
@@ -226,6 +229,7 @@ final class AppState: ObservableObject {
     var panelSearchButtonFrame: CGRect?
     var panelFavoriteAddButtonFrame: CGRect?
     var panelStackButtonFrame: CGRect?
+    var panelPasteFormatButtonFrame: CGRect?
     var panelPinButtonFrame: CGRect?
     var pendingFavoriteGroupRenameID: FavoriteGroup.ID?
 
@@ -430,6 +434,17 @@ final class AppState: ObservableObject {
 
     func toggleFavorite(for itemID: ClipboardItem.ID) {
         guard let index = history.firstIndex(where: { $0.id == itemID }) else { return }
+
+        switch history[index].kind {
+        case .image, .file, .stack:
+            if favoriteHistoryItems.contains(where: { $0.id == itemID }) {
+                removeFavoriteHistoryItem(itemID: itemID)
+            }
+            return
+        case .text, .passthroughText:
+            break
+        }
+
         history[index].isFavorite.toggle()
         if history[index].isFavorite {
             history[index].favoriteSortOrder = favoritePanelTopSortOrder(excluding: .historyItem(itemID))
@@ -446,9 +461,61 @@ final class AppState: ObservableObject {
     }
 
     func remove(itemID: ClipboardItem.ID) {
+        if let favIndex = favoriteHistoryItems.firstIndex(where: { $0.id == itemID }) {
+            let removed = [favoriteHistoryItems[favIndex]]
+            favoriteHistoryItems.remove(at: favIndex)
+            normalizeGlobalFavoritePanelSortOrders()
+            normalizeFavoriteGroupMemberOrders()
+            notifyRemovedItems(removed)
+            return
+        }
+
         let removed = history.filter { $0.id == itemID }
         history.removeAll { $0.id == itemID }
         normalizeFavoriteGroupMemberOrders()
+        recalculateHistoryDiskUsage()
+        clampPanelVisibleStartIndex()
+        notifyRemovedItems(removed)
+    }
+
+    func addFavoriteHistoryItem(_ item: ClipboardItem) {
+        var newItem = item
+        newItem.favoriteSortOrder = favoritePanelTopSortOrder(excluding: .historyItem(newItem.id))
+        favoriteHistoryItems.insert(newItem, at: 0)
+        favoriteHistoryItems = sortHistory(favoriteHistoryItems)
+        normalizeGlobalFavoritePanelSortOrders()
+        normalizeFavoriteGroupMemberOrders()
+    }
+
+    func removeFavoriteHistoryItem(itemID: ClipboardItem.ID, cleanupAssets: Bool = true) {
+        guard favoriteHistoryItems.contains(where: { $0.id == itemID }) else { return }
+        let removed = favoriteHistoryItems.filter { $0.id == itemID }
+        favoriteHistoryItems.removeAll { $0.id == itemID }
+        normalizeGlobalFavoritePanelSortOrders()
+        normalizeFavoriteGroupMemberOrders()
+        if cleanupAssets {
+            notifyRemovedItems(removed)
+        }
+    }
+
+    func restoreFavoriteHistoryItems(_ items: [ClipboardItem]) {
+        favoriteHistoryItems = sortHistory(items)
+        normalizeGlobalFavoritePanelSortOrders()
+        normalizeFavoriteGroupMemberOrders()
+    }
+
+    func clearHistory(range: HistoryCleanupRange) {
+        guard range != .none else { return }
+
+        let before = history
+        if let cutoff = range.cutoffDate {
+            history.removeAll { $0.createdAt < cutoff }
+        } else {
+            history.removeAll()
+        }
+        let removed = before.filter { item in !history.contains { $0.id == item.id } }
+
+        history = sortHistory(history)
         recalculateHistoryDiskUsage()
         clampPanelVisibleStartIndex()
         notifyRemovedItems(removed)
@@ -483,13 +550,14 @@ final class AppState: ObservableObject {
     func updateItem(itemID: ClipboardItem.ID, mutate: (inout ClipboardItem) -> Void) {
         guard let index = history.firstIndex(where: { $0.id == itemID }) else { return }
         let wasFavorite = history[index].isFavorite
+        let isTextKind = history[index].kind == .text || history[index].kind == .passthroughText
         mutate(&history[index])
-        if history[index].isFavorite {
+        if isTextKind && history[index].isFavorite {
             if !wasFavorite || history[index].favoriteSortOrder == nil {
                 history[index].favoriteSortOrder = favoritePanelTopSortOrder(excluding: .historyItem(itemID))
             }
             history[index].favoriteGroupIDs = sanitizedFavoriteGroupIDs(history[index].favoriteGroupIDs)
-        } else {
+        } else if !isTextKind {
             history[index].favoriteSortOrder = nil
             history[index].favoriteGroupIDs = []
         }
@@ -764,11 +832,9 @@ final class AppState: ObservableObject {
         guard let index = history.firstIndex(where: { $0.id == itemID }) else { return }
 
         var replacement = item
-        if !replacement.isSessionOnly {
-            replacement.isFavorite = history[index].isFavorite
-            replacement.favoriteSortOrder = history[index].favoriteSortOrder
-            replacement.favoriteGroupIDs = history[index].favoriteGroupIDs
-        }
+        replacement.isFavorite = false
+        replacement.favoriteSortOrder = nil
+        replacement.favoriteGroupIDs = []
 
         history[index] = replacement
         history = sortHistory(history)
@@ -856,6 +922,7 @@ final class AppState: ObservableObject {
         isStackProcessorPresented = false
         stackProcessorDraft = ""
         isFavoriteEditorPresented = false
+        isRichTextPreviewEnabled = false
         activeFavoriteSnippetID = nil
         activeFavoriteGroupID = nil
         favoriteEditorDraft = ""
@@ -867,6 +934,7 @@ final class AppState: ObservableObject {
 
     func clearTransientPanelState() {
         panelMode = .history
+        isRichTextPreviewEnabled = false
         hoveredRowID = nil
         rightDragHighlightedRowID = nil
         isRightDragSelecting = false
@@ -1066,13 +1134,8 @@ final class AppState: ObservableObject {
         let entries = favoriteSnippets
             .filter { $0.belongs(to: groupID) }
             .map(FavoritePanelEntry.snippet) +
-            history
-            .filter {
-                $0.isFavorite &&
-                $0.kind != .text &&
-                $0.kind != .passthroughText &&
-                (groupID == nil || $0.favoriteGroupIDs.contains(groupID!))
-            }
+            favoriteHistoryItems
+            .filter { groupID == nil || $0.favoriteGroupIDs.contains(groupID!) }
             .map(FavoritePanelEntry.historyItem)
 
         let orderMap = favoriteEntryOrderMap(for: groupID)
@@ -1106,13 +1169,8 @@ final class AppState: ObservableObject {
         let snippetOrders = favoriteSnippets.compactMap { snippet in
             FavoriteEntryOrderKey.snippet(snippet.id) == excludedKey ? nil : snippet.sortOrder
         }
-        let historyOrders = history.compactMap { item -> Int? in
-            guard item.isFavorite,
-                  item.kind != .text,
-                  item.kind != .passthroughText,
-                  FavoriteEntryOrderKey.historyItem(item.id) != excludedKey else {
-                return nil
-            }
+        let historyOrders = favoriteHistoryItems.compactMap { item -> Int? in
+            guard FavoriteEntryOrderKey.historyItem(item.id) != excludedKey else { return nil }
             return item.favoriteSortOrder
         }
         let currentTopOrder = (snippetOrders + historyOrders).min() ?? 0
@@ -1125,9 +1183,7 @@ final class AppState: ObservableObject {
 
     private func currentGlobalFavoriteEntryOrder() -> [FavoriteEntryOrderKey] {
         let entries = favoriteSnippets.map(FavoritePanelEntry.snippet) +
-            history
-            .filter { $0.isFavorite && $0.kind != .text && $0.kind != .passthroughText }
-            .map(FavoritePanelEntry.historyItem)
+            favoriteHistoryItems.map(FavoritePanelEntry.historyItem)
 
         return entries
             .sorted(by: compareStoredGlobalFavoriteOrder)
@@ -1141,17 +1197,13 @@ final class AppState: ObservableObject {
             favoriteSnippets[index].sortOrder = orderMap[.snippet(favoriteSnippets[index].id)]
         }
 
-        for index in history.indices {
-            let key = FavoriteEntryOrderKey.historyItem(history[index].id)
-            if history[index].isFavorite && history[index].kind != .text && history[index].kind != .passthroughText {
-                history[index].favoriteSortOrder = orderMap[key]
-            } else {
-                history[index].favoriteSortOrder = nil
-            }
+        for index in favoriteHistoryItems.indices {
+            let key = FavoriteEntryOrderKey.historyItem(favoriteHistoryItems[index].id)
+            favoriteHistoryItems[index].favoriteSortOrder = orderMap[key]
         }
 
         favoriteSnippets = sortFavoriteSnippets(favoriteSnippets)
-        history = sortHistory(history)
+        favoriteHistoryItems = sortHistory(favoriteHistoryItems)
     }
 
     private func compareStoredGlobalFavoriteOrder(_ lhs: FavoritePanelEntry, _ rhs: FavoritePanelEntry) -> Bool {
@@ -1204,7 +1256,7 @@ final class AppState: ObservableObject {
 
     private func moveFavoriteItemToTopInGroup(_ itemID: ClipboardItem.ID, groupID: FavoriteGroup.ID) {
         guard let index = favoriteGroups.firstIndex(where: { $0.id == groupID }) else { return }
-        guard history.contains(where: { $0.id == itemID && $0.isFavorite && $0.favoriteGroupIDs.contains(groupID) }) else { return }
+        guard favoriteHistoryItems.contains(where: { $0.id == itemID && $0.favoriteGroupIDs.contains(groupID) }) else { return }
         favoriteGroups[index].prependHistoryItemID(itemID)
         favoriteGroups[index].updatedAt = Date()
         normalizeFavoriteGroupMemberOrders()
@@ -1227,8 +1279,8 @@ final class AppState: ObservableObject {
                 favoriteSnippets
                     .filter { $0.groupIDs.contains(groupID) }
                     .map { FavoriteEntryOrderKey.snippet($0.id) } +
-                    history
-                    .filter { $0.isFavorite && $0.favoriteGroupIDs.contains(groupID) && $0.kind != .text && $0.kind != .passthroughText }
+                    favoriteHistoryItems
+                    .filter { $0.favoriteGroupIDs.contains(groupID) }
                     .map { FavoriteEntryOrderKey.historyItem($0.id) }
             )
 
@@ -1319,12 +1371,12 @@ final class AppState: ObservableObject {
             favoriteSnippets[index].groupIDs = favoriteSnippets[index].groupIDs.filter { validGroupIDs.contains($0) }
         }
 
+        for index in favoriteHistoryItems.indices {
+            favoriteHistoryItems[index].favoriteGroupIDs = favoriteHistoryItems[index].favoriteGroupIDs.filter { validGroupIDs.contains($0) }
+        }
+
         for index in history.indices {
-            if history[index].isFavorite {
-                history[index].favoriteGroupIDs = history[index].favoriteGroupIDs.filter { validGroupIDs.contains($0) }
-            } else {
-                history[index].favoriteGroupIDs = []
-            }
+            history[index].favoriteGroupIDs = []
         }
 
         if let activeFavoriteGroupID, !validGroupIDs.contains(activeFavoriteGroupID) {

@@ -80,7 +80,8 @@ private final class BoundedTextCache {
 final class ClipboardPersistence {
     let rootDirectoryURL: URL
     private let fileURL: URL
-    private let assetStore: ClipboardAssetStore
+    private let favoriteHistoryFileURL: URL
+    let assetStore: ClipboardAssetStore
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let fileManager: FileManager
@@ -88,6 +89,8 @@ final class ClipboardPersistence {
     private let saveQueue = DispatchQueue(label: "com.ivean.edgeclip.history-save", qos: .utility)
     private var pendingSaveWorkItem: DispatchWorkItem?
     private var pendingSaveTaskID = UUID()
+    private var pendingFavoriteSaveWorkItem: DispatchWorkItem?
+    private var pendingFavoriteSaveTaskID = UUID()
     private let saveDebounceInterval: TimeInterval = 0.15
 
     init(
@@ -97,6 +100,7 @@ final class ClipboardPersistence {
         self.rootDirectoryURL = rootDirectoryURL
         self.fileManager = fileManager
         fileURL = rootDirectoryURL.appendingPathComponent("history.json", isDirectory: false)
+        favoriteHistoryFileURL = rootDirectoryURL.appendingPathComponent("favorite-history-items.json", isDirectory: false)
         assetStore = ClipboardAssetStore(rootDirectoryURL: rootDirectoryURL, fileManager: fileManager)
     }
 
@@ -222,6 +226,98 @@ final class ClipboardPersistence {
 
     func cleanupOrphanedAssets(using items: [ClipboardItem]) {
         assetStore.cleanupOrphanedAssets(using: items)
+    }
+
+    func loadFavoriteHistoryItems() -> [ClipboardItem] {
+        guard fileManager.fileExists(atPath: favoriteHistoryFileURL.path) else { return [] }
+        do {
+            let data = try Data(contentsOf: favoriteHistoryFileURL)
+            return try decoder.decode([ClipboardItem].self, from: data)
+        } catch {
+            return []
+        }
+    }
+
+    func saveFavoriteHistoryItems(_ items: [ClipboardItem]) {
+        cancelPendingFavoriteSave()
+
+        let taskID = UUID()
+        self.pendingFavoriteSaveTaskID = taskID
+        let fileURL = self.favoriteHistoryFileURL
+        let fileManager = self.fileManager
+        let directory = fileURL.deletingLastPathComponent()
+
+        let workItem = DispatchWorkItem { [weak self, items] in
+            guard let self, self.pendingFavoriteSaveTaskID == taskID else { return }
+            do {
+                try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+                let data = try JSONEncoder().encode(items)
+                guard self.pendingFavoriteSaveTaskID == taskID else { return }
+                try data.write(to: fileURL, options: .atomic)
+            } catch {}
+        }
+
+        pendingFavoriteSaveWorkItem = workItem
+        saveQueue.asyncAfter(deadline: .now() + saveDebounceInterval, execute: workItem)
+    }
+
+    func addFavoriteHistoryItemCopy(from item: ClipboardItem) -> ClipboardItem? {
+        let newID = UUID()
+
+        switch item.kind {
+        case .image:
+            guard let oldPath = item.imageAssetRelativePath,
+                  let newPath = assetStore.copyImageAsset(from: oldPath, newID: newID) else { return nil }
+            var newPayload = item.imagePayload
+            newPayload?.assetRelativePath = newPath
+            return ClipboardItem(
+                id: newID,
+                createdAt: Date(),
+                kind: .image,
+                isFavorite: true,
+                sourceHistoryItemID: item.id,
+                favoriteSortOrder: nil,
+                favoriteGroupIDs: item.favoriteGroupIDs,
+                sourceAppBundleID: item.sourceAppBundleID,
+                sourceAppName: item.sourceAppName,
+                imagePayload: newPayload
+            )
+        case .file:
+            guard item.hasProtectedFileCopies else { return nil }
+            return ClipboardItem(
+                id: newID,
+                createdAt: Date(),
+                kind: .file,
+                isFavorite: true,
+                sourceHistoryItemID: item.id,
+                favoriteSortOrder: nil,
+                favoriteGroupIDs: item.favoriteGroupIDs,
+                sourceAppBundleID: item.sourceAppBundleID,
+                sourceAppName: item.sourceAppName,
+                filePayload: item.filePayload
+            )
+        case .stack:
+            return ClipboardItem(
+                id: newID,
+                createdAt: Date(),
+                kind: .stack,
+                isFavorite: true,
+                sourceHistoryItemID: item.id,
+                favoriteSortOrder: nil,
+                favoriteGroupIDs: item.favoriteGroupIDs,
+                sourceAppBundleID: item.sourceAppBundleID,
+                sourceAppName: item.sourceAppName,
+                stackPayload: item.stackPayload
+            )
+        case .text, .passthroughText:
+            return nil
+        }
+    }
+
+    func cancelPendingFavoriteSave() {
+        pendingFavoriteSaveWorkItem?.cancel()
+        pendingFavoriteSaveWorkItem = nil
+        pendingFavoriteSaveTaskID = UUID()
     }
 
     private func ensureParentDirectory() throws {

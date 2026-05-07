@@ -3,6 +3,7 @@ import Combine
 import Foundation
 import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum FilePresentationSupport {
     struct Metadata: Sendable {
@@ -207,6 +208,7 @@ final class AppServices: ObservableObject {
         case search
         case favoriteAdd
         case stack
+        case pasteFormat
         case pin
         case none
     }
@@ -328,6 +330,7 @@ final class AppServices: ObservableObject {
     private let globalHotkeyService = GlobalHotkeyService()
     private let panelPreviewHotkeyBridgeService = PanelPreviewHotkeyBridgeService()
     private let readbackServiceClient = ClipboardReadbackServiceClient()
+    private let updateCheckService = UpdateCheckService(url: EdgeClipExternalLinks.updatesURL)
     private let ownBundleID = Bundle.main.bundleIdentifier
     private var activeDataStorageRootURL = AppServices.defaultDataStorageRootURL()
     private var activeDataStorageSecurityScopeURL: URL?
@@ -592,8 +595,10 @@ final class AppServices: ObservableObject {
         appState.restoreHistory(persistence.load())
         appState.restoreFavoriteSnippets(favoriteSnippetPersistence.load())
         migrateLegacyTextFavoritesIfNeeded()
+        appState.restoreFavoriteHistoryItems(persistence.loadFavoriteHistoryItems())
+        migrateFavoritedHistoryItemsToIndependentStorage()
         appState.dormantStackItemID = currentStackHistoryItem()?.id
-        persistence.cleanupOrphanedAssets(using: appState.history)
+        persistence.cleanupOrphanedAssets(using: appState.history + appState.favoriteHistoryItems)
 
         observePersistence()
         persistence.save(appState.history)
@@ -726,6 +731,12 @@ final class AppServices: ObservableObject {
         updatePreferredColorSchemeIfNeeded(colorScheme(for: appState.settings.appearanceMode))
         applyApplicationVisibilityState()
         applyMenuBarStatusItemState()
+
+        if shouldPerformScheduledUpdateCheck() {
+            Task { [weak self] in
+                await self?.performScheduledUpdateCheck()
+            }
+        }
     }
 
     private func evictOlderRunningInstancesIfNeeded() {
@@ -1048,14 +1059,14 @@ final class AppServices: ObservableObject {
 
     func moveFavoriteItemToTop(_ itemID: ClipboardItem.ID) {
         let activeGroupID = appState.activeFavoriteGroupID
-        var favorites = appState.filteredFavoriteHistoryItems(in: activeGroupID, matching: nil)
-        guard let index = favorites.firstIndex(where: { $0.id == itemID }),
-              index > 0 else {
-            return
-        }
+        var entries = appState.favoritePanelEntries(in: activeGroupID, matching: nil)
+        guard let index = entries.firstIndex(where: {
+            if case .historyItem(let item) = $0, item.id == itemID { return true }
+            return false
+        }), index > 0 else { return }
 
-        favorites.move(fromOffsets: IndexSet(integer: index), toOffset: 0)
-        appState.applyFavoriteOrdering(favorites.map(\.id), in: activeGroupID)
+        entries.move(fromOffsets: IndexSet(integer: index), toOffset: 0)
+        appState.applyFavoriteEntryOrdering(entries.map(\.orderKey), in: activeGroupID)
     }
 
     func moveFavoriteSnippets(fromOffsets offsets: IndexSet, toOffset destination: Int) {
@@ -1068,14 +1079,14 @@ final class AppServices: ObservableObject {
 
     func moveFavoriteSnippetToTop(_ snippetID: FavoriteSnippet.ID) {
         let activeGroupID = appState.activeFavoriteGroupID
-        var snippets = appState.filteredFavoriteSnippets(in: activeGroupID, matching: nil)
-        guard let index = snippets.firstIndex(where: { $0.id == snippetID }),
-              index > 0 else {
-            return
-        }
+        var entries = appState.favoritePanelEntries(in: activeGroupID, matching: nil)
+        guard let index = entries.firstIndex(where: {
+            if case .snippet(let sn) = $0, sn.id == snippetID { return true }
+            return false
+        }), index > 0 else { return }
 
-        snippets.move(fromOffsets: IndexSet(integer: index), toOffset: 0)
-        appState.applyFavoriteSnippetOrdering(snippets.map(\.id), in: activeGroupID)
+        entries.move(fromOffsets: IndexSet(integer: index), toOffset: 0)
+        appState.applyFavoriteEntryOrdering(entries.map(\.orderKey), in: activeGroupID)
     }
 
     func moveFavoriteEntries(fromOffsets offsets: IndexSet, toOffset destination: Int) {
@@ -1279,6 +1290,61 @@ final class AppServices: ObservableObject {
         }
         transientNoticeDismissWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: workItem)
+    }
+
+    func checkForUpdates() async {
+        await performUpdateCheck(silentWhenUpToDate: false)
+    }
+
+    private func performScheduledUpdateCheck() async {
+        await performUpdateCheck(silentWhenUpToDate: true)
+    }
+
+    private func performUpdateCheck(silentWhenUpToDate: Bool) async {
+        let result = await updateCheckService.checkForUpdates()
+        switch result {
+        case .upToDate:
+            appState.updateSettings { settings in
+                settings.lastUpdateCheckDate = Date()
+            }
+            if !silentWhenUpToDate {
+                showTransientNotice(
+                    AppLocalization.localized("Edge Clip 已是最新版本。"),
+                    tone: .info,
+                    duration: 3
+                )
+            }
+        case .updateAvailable(let info):
+            appState.updateSettings { settings in
+                settings.lastUpdateCheckDate = Date()
+            }
+            showTransientNotice(
+                AppLocalization.localized("发现新版本 v\(info.version)：\(info.releaseNotes)"),
+                tone: .info,
+                duration: 6
+            )
+        case .failed:
+            if !silentWhenUpToDate {
+                showTransientNotice(
+                    AppLocalization.localized("检查更新失败，请稍后重试。"),
+                    tone: .warning,
+                    duration: 3
+                )
+            }
+        }
+    }
+
+    private func shouldPerformScheduledUpdateCheck() -> Bool {
+        switch appState.settings.updateCheckFrequency {
+        case .never:
+            return false
+        case .everyLaunch:
+            return true
+        case .weekly:
+            guard let lastCheck = appState.settings.lastUpdateCheckDate else { return true }
+            let interval = Date().timeIntervalSince(lastCheck)
+            return interval >= 7 * 24 * 60 * 60
+        }
     }
 
     private func showCopiedOnlyPasteNotice() {
@@ -1681,7 +1747,8 @@ final class AppServices: ObservableObject {
             guard let fingerprint = favoriteSnippetFingerprint(for: item) else { return false }
             return appState.favoriteSnippets.contains { $0.sourceTextFingerprint == fingerprint }
         case .image, .file, .stack:
-            return item.isFavorite
+            return appState.favoriteHistoryItems.contains { $0.id == item.id }
+                || appState.favoriteHistoryItems.contains { $0.sourceHistoryItemID == item.id }
         }
     }
 
@@ -1693,7 +1760,10 @@ final class AppServices: ObservableObject {
                 $0.sourceTextFingerprint == fingerprint && $0.groupIDs.contains(groupID)
             }
         case .image, .file, .stack:
-            return item.favoriteGroupIDs.contains(groupID)
+            return appState.favoriteHistoryItems.contains {
+                ($0.id == item.id || $0.sourceHistoryItemID == item.id)
+                && $0.favoriteGroupIDs.contains(groupID)
+            }
         }
     }
 
@@ -1796,19 +1866,27 @@ final class AppServices: ObservableObject {
 
         switch latestItem.kind {
         case .file:
-            if latestItem.isFavorite {
-                return latestItem.id
+            if let existing = appState.favoriteHistoryItems.first(where: { $0.id == latestItem.id }) {
+                return existing.id
             }
             materializeProtectedFileFavorite(for: latestItem, showsNotice: false)
-            return appState.item(withID: latestItem.id)?.isFavorite == true ? latestItem.id : nil
+            guard let updatedItem = appState.item(withID: latestItem.id),
+                  updatedItem.hasProtectedFileCopies else { return nil }
+
+            guard let copy = persistence.addFavoriteHistoryItemCopy(from: updatedItem) else { return nil }
+            appState.addFavoriteHistoryItem(copy)
+            saveFavoriteHistoryItems()
+            return copy.id
+
         case .image, .stack:
-            if latestItem.isFavorite {
-                return latestItem.id
+            if let existing = appState.favoriteHistoryItems.first(where: { $0.id == latestItem.id }) {
+                return existing.id
             }
-            appState.updateItem(itemID: latestItem.id) { updatedItem in
-                updatedItem.isFavorite = true
-            }
-            return latestItem.id
+            guard let copy = persistence.addFavoriteHistoryItemCopy(from: latestItem) else { return nil }
+            appState.addFavoriteHistoryItem(copy)
+            saveFavoriteHistoryItems()
+            return copy.id
+
         case .text, .passthroughText:
             return nil
         }
@@ -2067,25 +2145,68 @@ final class AppServices: ObservableObject {
     }
 
     private func toggleFavoriteAsync(for itemID: ClipboardItem.ID) async {
+        if let favItem = appState.favoriteHistoryItems.first(where: { $0.id == itemID }) {
+            promoteHistoryItemForUnfavoritedCopy(favItem)
+            appState.removeFavoriteHistoryItem(itemID: itemID, cleanupAssets: false)
+            saveFavoriteHistoryItems()
+            return
+        }
+
         guard let item = appState.item(withID: itemID) else { return }
 
         switch item.kind {
         case .file:
-            if item.isFavorite {
-                unfavoriteAndPromoteItem(item)
+            if let favItem = appState.favoriteHistoryItems.first(where: { $0.sourceHistoryItemID == itemID }) {
+                promoteHistoryItemForUnfavoritedCopy(favItem)
+                appState.removeFavoriteHistoryItem(itemID: favItem.id, cleanupAssets: false)
+                saveFavoriteHistoryItems()
                 return
             }
             materializeProtectedFileFavorite(for: item, showsNotice: true)
+            guard let updatedItem = appState.item(withID: item.id),
+                  updatedItem.hasProtectedFileCopies else { return }
+            guard let copy = persistence.addFavoriteHistoryItemCopy(from: updatedItem) else { return }
+            appState.addFavoriteHistoryItem(copy)
+            saveFavoriteHistoryItems()
+
         case .image, .stack:
-            if item.isFavorite {
-                unfavoriteAndPromoteItem(item)
-            } else {
-                appState.toggleFavorite(for: itemID)
+            if let favItem = appState.favoriteHistoryItems.first(where: { $0.sourceHistoryItemID == itemID }) {
+                promoteHistoryItemForUnfavoritedCopy(favItem)
+                appState.removeFavoriteHistoryItem(itemID: favItem.id, cleanupAssets: false)
+                saveFavoriteHistoryItems()
+                return
             }
+            guard let copy = persistence.addFavoriteHistoryItemCopy(from: item) else { return }
+            appState.addFavoriteHistoryItem(copy)
+            saveFavoriteHistoryItems()
+
         case .text:
             toggleTextFavorite(item)
         case .passthroughText:
             await togglePassthroughTextFavorite(item)
+        }
+    }
+
+    private func promoteHistoryItemForUnfavoritedCopy(_ favItem: ClipboardItem) {
+        guard let sourceID = favItem.sourceHistoryItemID else { return }
+        if appState.history.contains(where: { $0.id == sourceID }) {
+            appState.updateItem(itemID: sourceID) { item in
+                item.createdAt = Date()
+            }
+        } else {
+            let restored = ClipboardItem(
+                id: UUID(),
+                createdAt: Date(),
+                kind: favItem.kind,
+                isFavorite: false,
+                sourceAppBundleID: favItem.sourceAppBundleID,
+                sourceAppName: favItem.sourceAppName,
+                imagePayload: favItem.imagePayload,
+                filePayload: favItem.filePayload,
+                stackPayload: favItem.stackPayload
+            )
+            appState.prependHistoryItem(restored, collapseDuplicates: false)
+            persistence.save(appState.history)
         }
     }
 
@@ -4196,6 +4317,32 @@ final class AppServices: ObservableObject {
         }
     }
 
+    private func migrateFavoritedHistoryItemsToIndependentStorage() {
+        let itemsToMigrate = appState.history.filter {
+            $0.isFavorite && $0.kind != .text && $0.kind != .passthroughText
+        }
+        guard !itemsToMigrate.isEmpty else { return }
+
+        for item in itemsToMigrate {
+            guard let copy = persistence.addFavoriteHistoryItemCopy(from: item) else { continue }
+            appState.addFavoriteHistoryItem(copy)
+        }
+
+        for item in itemsToMigrate {
+            appState.updateItem(itemID: item.id) { updatedItem in
+                updatedItem.isFavorite = false
+                updatedItem.favoriteSortOrder = nil
+                updatedItem.favoriteGroupIDs = []
+            }
+        }
+
+        saveFavoriteHistoryItems()
+    }
+
+    private func saveFavoriteHistoryItems() {
+        persistence.saveFavoriteHistoryItems(appState.favoriteHistoryItems)
+    }
+
     private func observePersistence() {
         guard cancellables.isEmpty else { return }
 
@@ -4226,6 +4373,15 @@ final class AppServices: ObservableObject {
                 guard let self else { return }
                 guard !self.isDataStorageMigrationInProgress else { return }
                 self.favoriteGroupPersistence.save(groups)
+            }
+            .store(in: &cancellables)
+
+        appState.$favoriteHistoryItems
+            .dropFirst()
+            .sink { [weak self] items in
+                guard let self else { return }
+                guard !self.isDataStorageMigrationInProgress else { return }
+                self.persistence.saveFavoriteHistoryItems(items)
             }
             .store(in: &cancellables)
 
@@ -4768,6 +4924,12 @@ final class AppServices: ObservableObject {
             rightDragFrozenViewportY = nil
             applyRightDragSelection(rowIndex: nil, rowIDs: rowIDs)
             return
+        case .pasteFormat:
+            appState.rightDragHeaderTarget = .pasteFormat
+            appState.rightDragHoveredTab = nil
+            rightDragFrozenViewportY = nil
+            applyRightDragSelection(rowIndex: nil, rowIDs: rowIDs)
+            return
         case .pin:
             appState.rightDragHeaderTarget = .pin
             appState.rightDragHoveredTab = nil
@@ -4814,6 +4976,11 @@ final class AppServices: ObservableObject {
             return
         case .stack:
             toggleStackMode()
+            return
+        case .pasteFormat:
+            appState.updateSettings { settings in
+                settings.textPasteFormat = settings.textPasteFormat == .rich ? .plain : .rich
+            }
             return
         case .pin:
             appState.isPanelPinned.toggle()
@@ -4925,6 +5092,11 @@ final class AppServices: ObservableObject {
         if let stackFrame = appState.panelStackButtonFrame,
            stackFrame.insetBy(dx: -6, dy: -6).contains(localPoint) {
             return .stack
+        }
+
+        if let pasteFormatFrame = appState.panelPasteFormatButtonFrame,
+           pasteFormatFrame.insetBy(dx: -6, dy: -6).contains(localPoint) {
+            return .pasteFormat
         }
 
         if let pinFrame = appState.panelPinButtonFrame,
@@ -5246,7 +5418,10 @@ final class AppServices: ObservableObject {
         let itemID = replacementTarget?.id ?? UUID()
         let createdAt = replacementTarget?.createdAt ?? Date()
         do {
-            let payload = try persistence.storeTextPayload(meaningfulText, itemID: itemID)
+            var payload = try persistence.storeTextPayload(meaningfulText, itemID: itemID)
+            // Attach rich text data from the capture payload, if available.
+            payload.richTextData = capture.richTextData
+            payload.htmlString = capture.htmlString
             let item = ClipboardItem(
                 id: itemID,
                 createdAt: createdAt,
@@ -5328,6 +5503,18 @@ final class AppServices: ObservableObject {
             .filter(\.isFileURL)
             .map(\.standardizedFileURL)
         guard !normalizedURLs.isEmpty else { return }
+
+        if normalizedURLs.count == 1,
+           let url = normalizedURLs.first,
+           let values = try? url.resourceValues(forKeys: [.typeIdentifierKey]),
+           let typeIdentifier = values.typeIdentifier,
+           UTType(typeIdentifier)?.conforms(to: .image) == true,
+           let image = NSImage(contentsOf: url) {
+            ingestCapturedImage(image,
+                sourceAppBundleID: sourceAppBundleID,
+                sourceAppName: sourceAppName)
+            return
+        }
 
         let displayNames = normalizedURLs.map { url in
             let name = url.lastPathComponent

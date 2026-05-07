@@ -130,6 +130,7 @@ final class PasteCoordinator {
         switch write(
             item: item,
             to: pasteboard,
+            textPasteFormat: settings.textPasteFormat,
             textProvider: textProvider,
             imageAssetURLProvider: imageAssetURLProvider,
             imageProvider: imageProvider
@@ -161,6 +162,7 @@ final class PasteCoordinator {
 
     func copyToPasteboard(
         item: ClipboardItem,
+        textPasteFormat: TextPasteFormat = .rich,
         textProvider: (ClipboardItem) -> String?,
         imageAssetURLProvider: (String) -> URL?,
         imageProvider: (ClipboardItem) -> NSImage?
@@ -168,6 +170,7 @@ final class PasteCoordinator {
         write(
             item: item,
             to: .general,
+            textPasteFormat: textPasteFormat,
             textProvider: textProvider,
             imageAssetURLProvider: imageAssetURLProvider,
             imageProvider: imageProvider
@@ -209,15 +212,70 @@ final class PasteCoordinator {
         return .failed("文本暂时无法写入系统剪贴板，请再试一次。")
     }
 
+    private func writeRichTextToPasteboard(
+        _ item: ClipboardItem,
+        to pasteboard: NSPasteboard,
+        textProvider: (ClipboardItem) -> String?
+    ) -> PasteboardWriteResult {
+        guard let payload = item.textPayload else {
+            return .failed("无法获取富文本数据")
+        }
+
+        activePasteboardDataProviders.removeAll()
+        pasteboard.clearContents()
+
+        let pbItem = NSPasteboardItem()
+
+        // Write RTFD data first (highest fidelity, includes images)
+        if let rtfdData = payload.richTextData {
+            pbItem.setData(rtfdData, forType: NSPasteboard.PasteboardType("com.apple.flat-rtfd"))
+        }
+
+        // Write RTF data if available
+        if let rtfdData = payload.richTextData,
+           let attributed = try? NSAttributedString(data: rtfdData, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil),
+           let rtfData = try? attributed.data(from: NSRange(location: 0, length: attributed.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) {
+            pbItem.setData(rtfData, forType: .rtf)
+        }
+
+        // Write HTML if available
+        if let html = payload.htmlString {
+            pbItem.setData(Data(html.utf8), forType: .html)
+        }
+
+        // Always write plain text as fallback
+        if let text = payload.rawText ?? textProvider(item) {
+            pbItem.setString(text, forType: .string)
+        }
+
+        pasteboard.clearContents()
+        if pasteboard.writeObjects([pbItem]) {
+            return .success
+        }
+
+        // Fallback to plain text only
+        if let text = payload.rawText {
+            return writeTextToPasteboard(text, to: pasteboard)
+        }
+        return .failed("无法写入富文本到系统剪贴板")
+    }
+
     private func write(
         item: ClipboardItem,
         to pasteboard: NSPasteboard,
+        textPasteFormat: TextPasteFormat,
         textProvider: (ClipboardItem) -> String?,
         imageAssetURLProvider: (String) -> URL?,
         imageProvider: (ClipboardItem) -> NSImage?
     ) -> PasteboardWriteResult {
         switch item.kind {
         case .text:
+            // Check if we should write rich text based on settings
+            if textPasteFormat == .rich,
+               let payload = item.textPayload,
+               payload.isRichText {
+                return writeRichTextToPasteboard(item, to: pasteboard, textProvider: textProvider)
+            }
             guard let text = textProvider(item) ?? item.textContent else {
                 return .failed(AppLocalization.localized("当前只保留了预览内容，请重新复制一次原文。"))
             }

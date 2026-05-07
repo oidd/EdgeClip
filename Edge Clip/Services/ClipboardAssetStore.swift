@@ -115,6 +115,26 @@ final class ClipboardAssetStore {
         fileManager.fileExists(atPath: url(for: relativePath).path)
     }
 
+    func copyImageAsset(from relativePath: String, newID: UUID) -> String? {
+        guard !relativePath.isEmpty else { return nil }
+        let sourceURL = url(for: relativePath)
+        guard fileManager.fileExists(atPath: sourceURL.path) else { return nil }
+
+        let newRelativePath = "\(newID.uuidString).png"
+        let destinationURL = url(for: newRelativePath)
+
+        do {
+            try ensureAssetsDirectory()
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            try fileManager.copyItem(at: sourceURL, to: destinationURL)
+            return newRelativePath
+        } catch {
+            return nil
+        }
+    }
+
     func cleanupOrphanedAssets(using items: [ClipboardItem]) {
         try? ensureAssetsDirectory()
 

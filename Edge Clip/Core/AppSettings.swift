@@ -353,6 +353,94 @@ enum HistoryRetentionPreset: String, Codable, CaseIterable {
     }
 }
 
+enum HistoryCleanupRange: String, CaseIterable, Identifiable {
+    case none
+    case oneDayAgo
+    case oneWeekAgo
+    case oneMonthAgo
+    case allTime
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .none:
+            return "-"
+        case .oneDayAgo:
+            return AppLocalization.localized("1天前")
+        case .oneWeekAgo:
+            return AppLocalization.localized("1周前")
+        case .oneMonthAgo:
+            return AppLocalization.localized("1个月前")
+        case .allTime:
+            return AppLocalization.localized("所有时间")
+        }
+    }
+
+    var confirmationLabel: String {
+        switch self {
+        case .none:
+            return ""
+        case .oneDayAgo:
+            return AppLocalization.localized("1天前")
+        case .oneWeekAgo:
+            return AppLocalization.localized("1周前")
+        case .oneMonthAgo:
+            return AppLocalization.localized("1个月前")
+        case .allTime:
+            return AppLocalization.localized("所有时间")
+        }
+    }
+
+    var cutoffDate: Date? {
+        let now = Date()
+        let calendar = Calendar.current
+        switch self {
+        case .none:
+            return nil
+        case .oneDayAgo:
+            return calendar.date(byAdding: .day, value: -1, to: now)
+        case .oneWeekAgo:
+            return calendar.date(byAdding: .day, value: -7, to: now)
+        case .oneMonthAgo:
+            return calendar.date(byAdding: .month, value: -1, to: now)
+        case .allTime:
+            return nil
+        }
+    }
+}
+
+enum TextPasteFormat: String, Codable, CaseIterable {
+    case rich
+    case plain
+
+    var title: String {
+        switch self {
+        case .rich:
+            return AppLocalization.localized("富文本")
+        case .plain:
+            return AppLocalization.localized("纯文本")
+        }
+    }
+}
+
+enum UpdateCheckFrequency: String, Codable, CaseIterable {
+    case never
+    case everyLaunch
+    case weekly
+
+    var title: String {
+        switch self {
+        case .never:
+            return AppLocalization.localized("从不检查")
+        case .everyLaunch:
+            return AppLocalization.localized("每次启动")
+        case .weekly:
+            return AppLocalization.localized("每周一次")
+        }
+    }
+}
+
 enum PastedItemPlacement: String, Codable, CaseIterable {
     case keepOriginal
     case moveToTop
@@ -670,6 +758,7 @@ struct AppSettings: Codable {
     var filePreviewEnabled: Bool = true
     var continuousFilePreviewEnabled: Bool = false
     var pastedItemPlacement: PastedItemPlacement = .moveToTop
+    var textPasteFormat: TextPasteFormat = .rich
     var panelReplaceableTabs: [PanelTab] = PanelTab.defaultReplaceableSlots
     var panelTabSwitchMode: PanelTabSwitchMode = .hover
     var pinnedPanelIdleTransparencyPercent: Int = 35
@@ -687,6 +776,8 @@ struct AppSettings: Codable {
     var menuBarStatusItemVisible: Bool = true
     var menuBarActivationEnabled: Bool = true
     var menuBarShowsLatestPreview: Bool = false
+    var updateCheckFrequency: UpdateCheckFrequency = .never
+    var lastUpdateCheckDate: Date?
     var rightMouseDragActivationEnabled: Bool = false
     var rightMouseDragTriggerDistance: CGFloat = 72
     var rightMouseAuxiliaryGestures: [RightMouseAuxiliaryGestureSettings] = [RightMouseAuxiliaryGestureSettings.default()]
@@ -723,6 +814,7 @@ struct AppSettings: Codable {
         case filePreviewEnabled
         case continuousFilePreviewEnabled
         case pastedItemPlacement
+        case textPasteFormat
         case panelReplaceableTabs
         case panelTabSwitchMode
         case pinnedPanelIdleTransparencyPercent
@@ -742,6 +834,8 @@ struct AppSettings: Codable {
         case menuBarStatusItemVisible
         case menuBarActivationEnabled
         case menuBarShowsLatestPreview
+        case updateCheckFrequency
+        case lastUpdateCheckDate
         case rightMouseDragActivationEnabled
         case rightMouseDragTriggerDistance
         case rightMouseAuxiliaryGesture
@@ -788,6 +882,7 @@ struct AppSettings: Codable {
         filePreviewEnabled = try container.decodeIfPresent(Bool.self, forKey: .filePreviewEnabled) ?? true
         continuousFilePreviewEnabled = try container.decodeIfPresent(Bool.self, forKey: .continuousFilePreviewEnabled) ?? false
         pastedItemPlacement = try container.decodeIfPresent(PastedItemPlacement.self, forKey: .pastedItemPlacement) ?? .moveToTop
+        textPasteFormat = try container.decodeIfPresent(TextPasteFormat.self, forKey: .textPasteFormat) ?? .rich
         if let storedSlots = try container.decodeIfPresent([PanelTab].self, forKey: .panelReplaceableTabs) {
             panelReplaceableTabs = PanelTab.sanitizedReplaceableSlots(from: storedSlots)
         } else {
@@ -832,6 +927,8 @@ struct AppSettings: Codable {
         menuBarStatusItemVisible = try container.decodeIfPresent(Bool.self, forKey: .menuBarStatusItemVisible) ?? true
         menuBarActivationEnabled = try container.decodeIfPresent(Bool.self, forKey: .menuBarActivationEnabled) ?? true
         menuBarShowsLatestPreview = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowsLatestPreview) ?? false
+        updateCheckFrequency = try container.decodeIfPresent(UpdateCheckFrequency.self, forKey: .updateCheckFrequency) ?? .never
+        lastUpdateCheckDate = try container.decodeIfPresent(Date.self, forKey: .lastUpdateCheckDate)
         rightMouseDragActivationEnabled = try container.decodeIfPresent(Bool.self, forKey: .rightMouseDragActivationEnabled) ?? false
         rightMouseDragTriggerDistance = try container.decodeIfPresent(CGFloat.self, forKey: .rightMouseDragTriggerDistance) ?? 72
         if let gestures = try container.decodeIfPresent([RightMouseAuxiliaryGestureSettings].self, forKey: .rightMouseAuxiliaryGestures) {
@@ -879,6 +976,7 @@ struct AppSettings: Codable {
         try container.encode(filePreviewEnabled, forKey: .filePreviewEnabled)
         try container.encode(continuousFilePreviewEnabled, forKey: .continuousFilePreviewEnabled)
         try container.encode(pastedItemPlacement, forKey: .pastedItemPlacement)
+        try container.encode(textPasteFormat, forKey: .textPasteFormat)
         try container.encode(PanelTab.sanitizedReplaceableSlots(from: panelReplaceableTabs), forKey: .panelReplaceableTabs)
         try container.encode(panelTabSwitchMode, forKey: .panelTabSwitchMode)
         try container.encode(pinnedPanelIdleTransparencyPercent, forKey: .pinnedPanelIdleTransparencyPercent)
@@ -895,6 +993,8 @@ struct AppSettings: Codable {
         try container.encode(menuBarStatusItemVisible, forKey: .menuBarStatusItemVisible)
         try container.encode(menuBarActivationEnabled, forKey: .menuBarActivationEnabled)
         try container.encode(menuBarShowsLatestPreview, forKey: .menuBarShowsLatestPreview)
+        try container.encode(updateCheckFrequency, forKey: .updateCheckFrequency)
+        try container.encodeIfPresent(lastUpdateCheckDate, forKey: .lastUpdateCheckDate)
         try container.encode(rightMouseDragActivationEnabled, forKey: .rightMouseDragActivationEnabled)
         try container.encode(rightMouseDragTriggerDistance, forKey: .rightMouseDragTriggerDistance)
         try container.encode(rightMouseAuxiliaryGestures, forKey: .rightMouseAuxiliaryGestures)

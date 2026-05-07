@@ -21,7 +21,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .panel:
             return AppLocalization.localized("剪贴面板")
         case .general:
-            return AppLocalization.localized("通用")
+            return AppLocalization.localized("常规设置")
         case .blacklist:
             return AppLocalization.localized("应用例外")
         case .about:
@@ -85,6 +85,9 @@ struct SettingsView: View {
     @State private var edgeCustomPositionDraft: Double?
     @State private var isAdjustingEdgeCustomPosition = false
     @State private var edgeCustomPositionDragPointerOffset: CGFloat?
+    @State private var cleanupRange: HistoryCleanupRange = .none
+    @State private var isCleanupConfirmationPresented = false
+    @State private var cleanupConfirmationText = ""
 
     private let historyLimitAccessoryWidth: CGFloat = 180
     private let auxiliaryGestureColumnWidth: CGFloat = 108
@@ -116,6 +119,9 @@ struct SettingsView: View {
         )
         .sheet(isPresented: $isOpenSourceCreditsPresented) {
             OpenSourceCreditsSheetView()
+        }
+        .sheet(isPresented: $isCleanupConfirmationPresented) {
+            cleanupConfirmationSheet
         }
         .onChange(of: appState.settings.edgeActivationEnabled) { _, isEnabled in
             if !isEnabled {
@@ -681,6 +687,28 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 10)
+
+                    settingsDivider(opacity: 0.4)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(localized("文本粘贴格式"))
+                            Spacer()
+                            Picker(localized("文本粘贴格式"), selection: settingsBinding(\.textPasteFormat)) {
+                                ForEach(TextPasteFormat.allCases, id: \.self) { format in
+                                    Text(format.title).tag(format)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .frame(width: AppLocalization.isEnglish ? 170 : 140, alignment: .trailing)
+                        }
+
+                        Text(localized("决定从剪贴面板粘贴文本时是否保留格式与内嵌图片。"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 10)
                 }
             }
 
@@ -793,6 +821,45 @@ struct SettingsView: View {
                         .labelsHidden()
                         .frame(width: historyLimitAccessoryWidth, alignment: .trailing)
                     }
+
+                    settingsDivider(opacity: 0.35)
+
+                    HStack(alignment: .center, spacing: 12) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.red)
+                            .frame(width: 24)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(localized("清理历史记录"))
+                            Text(localized("按时间范围清理不再需要的历史记录，不会影响收藏内容。"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer(minLength: 12)
+
+                        HStack(spacing: 8) {
+                            Picker("", selection: $cleanupRange) {
+                                ForEach(HistoryCleanupRange.allCases) { range in
+                                    Text(range.title).tag(range)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .frame(width: 130, alignment: .trailing)
+
+                            if cleanupRange != .none {
+                                Button(localized("清理")) {
+                                    cleanupConfirmationText = ""
+                                    isCleanupConfirmationPresented = true
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 6)
                 }
             }
 
@@ -927,7 +994,7 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         sectionPage(
-            title: "通用",
+            title: "常规设置",
             subtitle: "管理系统权限、启动行为、界面外观和其他通用设置。"
         ) {
             settingsCard(
@@ -1009,6 +1076,33 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                     .labelsHidden()
                     .frame(width: historyLimitAccessoryWidth, alignment: .trailing)
+                }
+            ) {
+                EmptyView()
+            }
+
+            settingsCard(
+                title: "检查更新",
+                subtitle: localized("当前版本：") + "v\(appVersion)",
+                contentTopSpacing: 0,
+                headerAccessory: {
+                    HStack(spacing: 6) {
+                        Button(localized("立即检查")) {
+                            Task { await services.checkForUpdates() }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .fixedSize()
+
+                        Picker("", selection: settingsBinding(\.updateCheckFrequency)) {
+                            ForEach(UpdateCheckFrequency.allCases, id: \.self) { freq in
+                                Text(freq.title).tag(freq)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .fixedSize()
+                    }
                 }
             ) {
                 EmptyView()
@@ -3365,6 +3459,72 @@ struct SettingsView: View {
         } else if !uniqueBundleIDs.isEmpty {
             appState.lastErrorMessage = nil
         }
+    }
+
+    private var cleanupConfirmationSheet: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text(localized("清理历史记录"))
+                .font(.title2.weight(.bold))
+
+            Text(cleanupConfirmationMessage)
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(cleanupConfirmationPrompt)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("", text: $cleanupConfirmationText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: .infinity)
+            }
+
+            HStack(spacing: 12) {
+                Spacer()
+
+                Button(localized("取消")) {
+                    isCleanupConfirmationPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(localized("确认清理"), role: .destructive) {
+                    performCleanup()
+                }
+                .disabled(!isCleanupConfirmationValid)
+            }
+        }
+        .padding(24)
+        .frame(width: 440)
+    }
+
+    private var cleanupConfirmationPrompt: String {
+        if AppLocalization.isEnglish {
+            return "Please type the confirmation text below (\"Confirm cleaning\"):"
+        }
+        return "请在下方输入确认文字（\"确认清理\"）："
+    }
+
+    private var cleanupConfirmationMessage: String {
+        let rangeLabel = cleanupRange.confirmationLabel
+        if AppLocalization.isEnglish {
+            return "You are about to clear \(rangeLabel) history records. Please note this will not clean your favorites."
+        }
+        return "您即将清理\(rangeLabel)的历史记录，请注意这不会清理您收藏的内容。"
+    }
+
+    private var isCleanupConfirmationValid: Bool {
+        let trimmed = cleanupConfirmationText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed == "确认清理" || trimmed == "Confirm cleaning"
+    }
+
+    private func performCleanup() {
+        guard cleanupRange != .none, isCleanupConfirmationValid else { return }
+        appState.clearHistory(range: cleanupRange)
+        cleanupRange = .none
+        isCleanupConfirmationPresented = false
+        services.showTransientNotice(localized("历史记录已清理完成。"), tone: .info)
     }
 }
 

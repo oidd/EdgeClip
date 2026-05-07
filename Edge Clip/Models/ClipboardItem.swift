@@ -120,7 +120,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
             case processor
         }
 
-        let id: UUID
+    let id: UUID
         var text: String
         var createdAt: Date
         var source: Source
@@ -155,6 +155,16 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     }
 
     struct TextPayload: Codable, Equatable {
+        /// RTF/RTFD data captured from the pasteboard, enabling rich text paste and preview.
+        var richTextData: Data?
+        /// HTML string captured from the pasteboard, used as fallback for rich text representation.
+        var htmlString: String?
+        /// Relative paths to image/attachment assets stored by ClipboardAssetStore for this rich text item.
+        var attachmentAssetRelativePaths: [String]
+        /// Whether this text payload carries any rich text information (RTF, HTML, or attachments).
+        var isRichText: Bool {
+            richTextData != nil || htmlString != nil || !attachmentAssetRelativePaths.isEmpty
+        }
         enum PreviewTier: String, Codable, Equatable {
             case full
             case partial
@@ -216,6 +226,9 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         init(
             rawText: String?,
             assetRelativePath: String? = nil,
+            richTextData: Data? = nil,
+            htmlString: String? = nil,
+            attachmentAssetRelativePaths: [String] = [],
             previewText: String,
             headSample: String,
             tailSample: String?,
@@ -228,6 +241,9 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         ) {
             self.rawText = rawText
             self.assetRelativePath = assetRelativePath
+            self.richTextData = richTextData
+            self.htmlString = htmlString
+            self.attachmentAssetRelativePaths = attachmentAssetRelativePaths
             self.previewText = previewText
             self.headSample = headSample
             self.tailSample = tailSample
@@ -246,6 +262,9 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         private enum CodingKeys: String, CodingKey {
             case rawText
             case assetRelativePath
+            case richTextData
+            case htmlString
+            case attachmentAssetRelativePaths
             case previewText
             case headSample
             case tailSample
@@ -261,6 +280,11 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             let decodedRawText = try container.decodeIfPresent(String.self, forKey: .rawText)
             let decodedAssetRelativePath = try container.decodeIfPresent(String.self, forKey: .assetRelativePath)
+
+            // New rich text fields — default to nil/[] for backward compatibility with old JSON.
+            richTextData = try container.decodeIfPresent(Data.self, forKey: .richTextData)
+            htmlString = try container.decodeIfPresent(String.self, forKey: .htmlString)
+            attachmentAssetRelativePaths = try container.decodeIfPresent([String].self, forKey: .attachmentAssetRelativePaths) ?? []
 
             if let decodedRawText {
                 let fallback = ClipboardItem.makeTextPayload(
@@ -306,6 +330,11 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encodeIfPresent(rawText, forKey: .rawText)
             try container.encodeIfPresent(assetRelativePath, forKey: .assetRelativePath)
+            try container.encodeIfPresent(richTextData, forKey: .richTextData)
+            try container.encodeIfPresent(htmlString, forKey: .htmlString)
+            if !attachmentAssetRelativePaths.isEmpty {
+                try container.encode(attachmentAssetRelativePaths, forKey: .attachmentAssetRelativePaths)
+            }
             try container.encode(previewText, forKey: .previewText)
             try container.encode(headSample, forKey: .headSample)
             try container.encodeIfPresent(tailSample, forKey: .tailSample)
@@ -471,6 +500,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         }
     }
     var isFavorite: Bool
+    var sourceHistoryItemID: UUID?
     var favoriteSortOrder: Int?
     var favoriteGroupIDs: [UUID]
     var availabilityIssue: AvailabilityIssue?
@@ -492,6 +522,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         createdAt: Date = Date(),
         kind: ContentKind,
         isFavorite: Bool = false,
+        sourceHistoryItemID: UUID? = nil,
         favoriteSortOrder: Int? = nil,
         favoriteGroupIDs: [UUID] = [],
         availabilityIssue: AvailabilityIssue? = nil,
@@ -507,6 +538,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.createdAt = createdAt
         self.kind = kind
         self.isFavorite = isFavorite
+        self.sourceHistoryItemID = sourceHistoryItemID
         self.favoriteSortOrder = favoriteSortOrder
         self.favoriteGroupIDs = Self.sanitizedFavoriteGroupIDs(favoriteGroupIDs)
         self.availabilityIssue = availabilityIssue
@@ -982,6 +1014,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         case createdAt
         case kind
         case isFavorite
+        case sourceHistoryItemID
         case favoriteSortOrder
         case favoriteGroupIDs
         case availabilityIssue
@@ -1008,6 +1041,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         let decodedIsFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite)
         let legacyIsPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned)
         isFavorite = decodedIsFavorite ?? legacyIsPinned ?? false
+        sourceHistoryItemID = try container.decodeIfPresent(UUID.self, forKey: .sourceHistoryItemID)
         favoriteSortOrder = try container.decodeIfPresent(Int.self, forKey: .favoriteSortOrder)
         favoriteGroupIDs = Self.sanitizedFavoriteGroupIDs(
             try container.decodeIfPresent([UUID].self, forKey: .favoriteGroupIDs) ?? []
@@ -1063,6 +1097,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(kind, forKey: .kind)
         try container.encode(isFavorite, forKey: .isFavorite)
+        try container.encodeIfPresent(sourceHistoryItemID, forKey: .sourceHistoryItemID)
         try container.encodeIfPresent(favoriteSortOrder, forKey: .favoriteSortOrder)
         try container.encode(favoriteGroupIDs, forKey: .favoriteGroupIDs)
         try container.encodeIfPresent(availabilityIssue, forKey: .availabilityIssue)

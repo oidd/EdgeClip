@@ -2,7 +2,7 @@
 "交互" = "Interaction";
 "使用偏好" = "Preferences";
 "剪贴面板" = "Clipboard Panel";
-"通用" = "General";
+"常规设置" = "General Settings";
 "应用例外" = "App Exceptions";
 "关于" = "About";
 
@@ -548,3 +548,41 @@
 "不会因为你跳过授权而阻止进入应用。" = "Skipping permission will not block you from entering the app.";
 "稍后你也可以随时在设置页重新触发授权。" = "You can trigger the permission flow again later from Settings at any time.";
 "点击“现在去授权”后，我们会发起系统辅助功能授权请求，并同时打开对应的系统设置页面，方便你直接完成。" = "After you click \"Grant Permission Now,\" we will request Accessibility permission and open the matching System Settings page so you can complete it directly.";
+
+/* Edge panel tab hover lock */
+"向下进入历史列表，即可滑动切换分类" = "Move into the list below to enable hover switching";
+
+/* Rich/Plain text paste format */
+"富文本" = "Rich Text";
+"纯文本" = "Plain Text";
+"切换为纯文本粘贴" = "Switch to Plain Text Paste";
+"切换为富文本粘贴" = "Switch to Rich Text Paste";
+"文本粘贴格式" = "Text Paste Format";
+"决定从剪贴面板粘贴文本时是否保留格式与内嵌图片。" = "Choose whether to preserve formatting and embedded images when pasting text from the clipboard panel.";
+
+/* Rich text preview toggle */
+"富文本预览" = "Rich Text Preview";
+"关闭富文本预览" = "Close Rich Text Preview";
+"该富文本包含图片信息" = "This rich text contains images";
+
+/* History cleanup */
+"清理历史记录" = "Clear History Records";
+"按时间范围清理不再需要的历史记录，不会影响收藏内容。" = "Clear history records by time range, favorites will not be affected.";
+"1天前" = "1 Day Ago";
+"1周前" = "1 Week Ago";
+"1个月前" = "1 Month Ago";
+"所有时间" = "All Time";
+"清理" = "Clean";
+"确认清理" = "Confirm cleaning";
+"取消" = "Cancel";
+"历史记录已清理完成。" = "History records have been cleared.";
+
+/* Check for Updates */
+"从不检查" = "Never";
+"每次启动" = "Every Launch";
+"每周一次" = "Once a Week";
+"检查更新" = "Check for Updates";
+"当前版本：" = "Current version: ";
+"立即检查" = "Check Now";
+"Edge Clip 已是最新版本。" = "Edge Clip is up to date.";
+"检查更新失败，请稍后重试。" = "Update check failed. Please try again later.";

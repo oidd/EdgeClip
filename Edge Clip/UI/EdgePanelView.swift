@@ -76,6 +76,8 @@ struct EdgePanelView: View {
     @State private var hoveredHistoryRowID: ClipboardItem.ID?
     @State private var hoverPreviewTab: PanelTab?
     @State private var isFilterBarPointerInside = false
+    @State private var tabLockHintTask: Task<Void, Never>?
+    @State private var showsTabLockHint = false
     @State private var areRowAssetsDeferred = false
     @State private var rememberedRowPreviewImages: [ClipboardItem.ID: NSImage] = [:]
     @State private var continuousPreviewHoverTask: Task<Void, Never>?
@@ -165,10 +167,23 @@ struct EdgePanelView: View {
             .onHover { hovering in
                 services.handleMainPanelHoverChanged(hovering)
             }
+            .overlay(alignment: .top) {
+                tabLockHintOverlay
+            }
             .overlay(alignment: .bottom) {
                 noticeOverlay
             }
         )
+    }
+
+    @ViewBuilder
+    private var tabLockHintOverlay: some View {
+        if showsTabLockHint, isTabBarVisuallyLocked, !isRightDragPanelInteractionActive {
+            tabLockHintBubble
+                .padding(.top, 92)
+                .transition(.opacity)
+                .allowsHitTesting(false)
+        }
     }
 
     private func makeLifecyclePanelView(_ base: AnyView) -> AnyView {
@@ -521,6 +536,31 @@ struct EdgePanelView: View {
                 )
             }
 
+            headerTooltipHost(.pasteFormat) {
+                chromeHeaderButton(action: {
+                    appState.updateSettings { settings in
+                        settings.textPasteFormat = settings.textPasteFormat == .rich ? .plain : .rich
+                    }
+                }, isHighlighted: appState.isRightDragSelecting && appState.rightDragHeaderTarget == .pasteFormat) {
+                    Image(appState.settings.textPasteFormat == .rich ? "RichTextIcon" : "PlainTextIcon")
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 14, height: 14)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.primary)
+                        .opacity(0.88)
+                }
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: HeaderControlFramePreferenceKey.self,
+                            value: [.pasteFormat: proxy.frame(in: .named(panelCoordinateSpace))]
+                        )
+                    }
+                )
+            }
+
             headerTooltipHost(.pin) {
                 Button {
                     appState.isPanelPinned.toggle()
@@ -557,6 +597,7 @@ struct EdgePanelView: View {
             appState.panelSearchButtonFrame = value[.search]
             appState.panelFavoriteAddButtonFrame = value[.favoriteAdd]
             appState.panelStackButtonFrame = value[.stack]
+            appState.panelPasteFormatButtonFrame = value[.pasteFormat]
             appState.panelPinButtonFrame = value[.pin]
         }
     }
@@ -695,6 +736,8 @@ struct EdgePanelView: View {
             Spacer(minLength: 0)
         }
         .coordinateSpace(name: filterBarCoordinateSpace)
+        .opacity(isTabBarVisuallyLocked ? 0.6 : 1.0)
+        .animation(.easeOut(duration: 0.18), value: isTabBarVisuallyLocked)
         .onPreferenceChange(TabFramePreferenceKey.self) { value in
             tabFrames = value
         }
@@ -711,11 +754,55 @@ struct EdgePanelView: View {
                         isFilterBarPointerInside = false
                         cancelFilterBarCommitTask()
                         hoverPreviewTab = nil
+                        cancelTabLockHintTask()
+                        if showsTabLockHint {
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                showsTabLockHint = false
+                            }
+                        }
                     }
                 )
             }
         }
+        .onChange(of: isTabBarVisuallyLocked) { _, locked in
+            if !locked {
+                cancelTabLockHintTask()
+                if showsTabLockHint {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        showsTabLockHint = false
+                    }
+                    markTabLockHintShown()
+                }
+            }
+        }
         .allowsHitTesting(!isFavoriteEditorTabLocked)
+    }
+
+    private var tabLockHintBubble: some View {
+        Text(localized("向下进入历史列表，即可滑动切换分类"))
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(Color.primary.opacity(0.96))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(
+                        colorScheme == .dark
+                            ? Color(red: 0.13, green: 0.14, blue: 0.16)
+                            : Color.white
+                    )
+                    .shadow(
+                        color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.12),
+                        radius: 8,
+                        y: 2
+                    )
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color.primary.opacity(colorScheme == .dark ? 0.22 : 0.14), lineWidth: 1)
+            )
     }
 
     @ViewBuilder
@@ -1033,6 +1120,7 @@ struct EdgePanelView: View {
             ? (appState.rightDragHoveredTab ?? appState.activeTab)
             : (usesHoverTabSwitching ? (hoverPreviewTab ?? appState.activeTab) : appState.activeTab)
         let isSelected = visuallySelectedTab == tab
+        let locked = isTabBarVisuallyLocked
 
         return Button {
             commitTabSelectionImmediately(tab)
@@ -1056,12 +1144,18 @@ struct EdgePanelView: View {
             )
             .overlay(
                 Capsule(style: .continuous)
-                    .stroke(isSelected ? selectedControlStrokeColor : defaultTabStrokeColor, lineWidth: 1)
+                    .stroke(
+                        isSelected ? selectedControlStrokeColor : defaultTabStrokeColor,
+                        style: StrokeStyle(lineWidth: 1, dash: locked && !isSelected ? [3, 3] : [])
+                    )
             )
         }
         .buttonStyle(.plain)
         .animation(nil, value: isSelected)
         .allowsHitTesting(!isFavoriteEditorTabLocked)
+        .onHover { hovering in
+            updateTabPointerCursor(hovering: hovering)
+        }
         .background(
             GeometryReader { proxy in
                 Color.clear
@@ -1075,6 +1169,59 @@ struct EdgePanelView: View {
                     )
             }
         )
+    }
+
+    private func updateTabPointerCursor(hovering: Bool) {
+        guard !isRightDragPanelInteractionActive else { return }
+        if hovering, isTabBarVisuallyLocked {
+            NSCursor.operationNotAllowed.set()
+            scheduleTabLockHintIfNeeded()
+        } else if hovering, !isTabBarVisuallyLocked {
+            NSCursor.arrow.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+
+    private func scheduleTabLockHintIfNeeded() {
+        guard !showsTabLockHint else { return }
+        guard !hasShownTabLockHint else { return }
+        guard tabLockHintTask == nil else { return }
+        tabLockHintTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            guard isTabBarVisuallyLocked, isFilterBarPointerInside, !hasShownTabLockHint else {
+                tabLockHintTask = nil
+                return
+            }
+            withAnimation(.easeOut(duration: 0.15)) {
+                showsTabLockHint = true
+            }
+            tabLockHintTask = nil
+        }
+    }
+
+    private func cancelTabLockHintTask() {
+        tabLockHintTask?.cancel()
+        tabLockHintTask = nil
+    }
+
+    private func markTabLockHintShown() {
+        UserDefaults.standard.set(true, forKey: tabLockHintShownDefaultsKey)
+    }
+
+    private var hasShownTabLockHint: Bool {
+        UserDefaults.standard.bool(forKey: tabLockHintShownDefaultsKey)
+    }
+
+    private var tabLockHintShownDefaultsKey: String {
+        "edgeclip.panelTabHoverLockHintShown.v1"
+    }
+
+    private var isTabBarVisuallyLocked: Bool {
+        guard !isFavoriteEditorTabLocked else { return false }
+        guard services.currentPanelRequiresTabHoverUnlock else { return false }
+        return !appState.isPanelTabHoverUnlocked
     }
 
     private var searchField: some View {
@@ -1797,6 +1944,8 @@ struct EdgePanelView: View {
             return localized("新增收藏")
         case .stack:
             return localized("进入堆栈")
+        case .pasteFormat:
+            return localized(appState.settings.textPasteFormat == .rich ? "切换为纯文本粘贴" : "切换为富文本粘贴")
         case .pin:
             return localized(appState.isPanelPinned ? "取消面板常显" : "开启面板常显")
         case .stackBack:
@@ -1820,6 +1969,8 @@ struct EdgePanelView: View {
             return .favoriteAdd
         case .stack:
             return .stack
+        case .pasteFormat:
+            return .pasteFormat
         case .pin:
             return .pin
         case nil:
@@ -3010,7 +3161,9 @@ private struct HistoryRowView: View, Equatable {
             if item.hasTruncatedTextPreview {
                 return localized("超长文本")
             }
-            return PanelTab.text.title
+            return item.textPayload?.isRichText == true
+                ? localized("富文本")
+                : localized("纯文本")
         case .passthroughText:
             return localized("超长文本")
         case .stack:
@@ -3769,6 +3922,7 @@ private enum HeaderControlFrameKey: Hashable {
     case search
     case favoriteAdd
     case stack
+    case pasteFormat
     case pin
 }
 
@@ -3777,6 +3931,7 @@ private enum HeaderTooltipID: Hashable {
     case search
     case favoriteAdd
     case stack
+    case pasteFormat
     case pin
     case stackBack
     case stackSequential
