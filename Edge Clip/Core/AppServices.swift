@@ -359,6 +359,11 @@ final class AppServices: ObservableObject {
     private var openSettingsWindowAction: (() -> Void)?
     private var started = false
     private var isSettingsWindowVisible = false
+    /// 记录本次进程已经弹过"发现新版本"对话框的远端版本号。计划性检查
+    /// （每次启动 / 每周）命中同一个版本时不再重复弹窗，避免反复打扰；
+    /// 用户手动点"立即检查"绕过该去重，让主动操作总能得到反馈。
+    private var lastPromptedUpdateVersion: String?
+    private var isUpdateAvailableAlertPresented = false
     private var rightDragLatestPointer: CGPoint?
     private var rightDragFrozenViewportY: CGFloat?
     private var previewDismissSafetyFrames: [NSRect] = []
@@ -561,6 +566,7 @@ final class AppServices: ObservableObject {
         started = true
 
         evictOlderRunningInstancesIfNeeded()
+        cleanupPasteStagingDirectory()
 
         var restoredSettings = settingsPersistence.load(defaultValue: appState.settings)
         restoredSettings.launchAtLoginEnabled = launchAtLoginService.isEnabled()
@@ -760,6 +766,10 @@ final class AppServices: ObservableObject {
         }
     }
 
+    private func cleanupPasteStagingDirectory() {
+        try? FileManager.default.removeItem(at: PasteCoordinator.pasteStagingRoot)
+    }
+
     func stop() {
         clipboardMonitor.stop()
         focusTracker.stop()
@@ -949,6 +959,13 @@ final class AppServices: ObservableObject {
             leaveStackModeToHistory()
         } else {
             openStackSession(from: currentStackHistoryItem())
+            // 从剪贴面板右上角"进入堆栈"按钮打开时：堆栈为空则自动展开"数据处理"面板，
+            // 已有历史堆栈则保持收起状态。
+            guard appState.panelMode == .stack else { return }
+            if (appState.activeStackSession?.entries.isEmpty ?? true) && !appState.isStackProcessorPresented {
+                appState.isStackProcessorPresented = true
+                updateAuxiliaryPanelPresentation()
+            }
         }
     }
 
@@ -1220,9 +1237,82 @@ final class AppServices: ObservableObject {
         guard let text = fullPreviewCurrentItem?.textContent else { return }
         clearFullPreviewPresentationState()
         openStackSession(from: currentStackHistoryItem())
-        appState.stackProcessorDraft = text
-        appState.isStackProcessorPresented = true
-        applyStackProcessorDraft(.replace)
+        applyAutoSplitToStack(text: text)
+    }
+
+    func openNewStackSession(fromTextItem item: ClipboardItem) {
+        guard item.kind == .text,
+              let text = item.textContent,
+              !text.isEmpty else { return }
+        if isFullPreviewPresented {
+            clearFullPreviewPresentationState()
+        }
+        openStackSession(from: currentStackHistoryItem())
+        applyAutoSplitToStack(text: text)
+    }
+
+    /// 从历史记录或预览面板进入堆栈时，按用户配置的"自动拆分"规则做首次拆分。
+    /// 拆分完成后不会自动展开"数据处理"面板，因为堆栈中此时已有内容。
+    /// 若堆栈已有条目，新拆分结果会插入到顶部，避免静默丢失用户原有内容。
+    private func applyAutoSplitToStack(text: String) {
+        guard appState.panelMode == .stack else { return }
+
+        let delimiter = appState.settings.stackAutoSplitDelimiter
+        let trimmedCustom = appState.settings.stackAutoSplitCustomDelimiter
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 当用户选了"自定义"但未填入分隔符时，退回到换行规则，避免整段被当成单条写入。
+        let effectiveDelimiter: StackDelimiterOption
+        let effectiveCustom: String
+        if delimiter == .custom && trimmedCustom.isEmpty {
+            effectiveDelimiter = .newline
+            effectiveCustom = ""
+        } else {
+            effectiveDelimiter = delimiter
+            effectiveCustom = trimmedCustom
+        }
+
+        let segments = stackService.splitDraft(
+            text,
+            delimiters: [effectiveDelimiter],
+            customDelimiter: effectiveCustom
+        )
+        let entries = stackService.makeEntries(
+            from: segments.isEmpty ? [text] : segments,
+            orderMode: currentStackOrderMode,
+            source: .processor
+        )
+
+        guard !entries.isEmpty else {
+            updateAuxiliaryPanelPresentation()
+            return
+        }
+
+        let hadExistingEntries = !(appState.activeStackSession?.entries.isEmpty ?? true)
+
+        appState.updateActiveStackSession { session in
+            if session.entries.isEmpty {
+                session.entries = entries
+            } else {
+                // 已有内容则插入到顶部，保留用户原本累积的条目。
+                session.entries = entries + session.entries
+            }
+        }
+        persistActiveStackSession()
+
+        if hadExistingEntries {
+            showTransientNotice(
+                AppLocalization.localized("已按规则拆分并插入到堆栈顶部。"),
+                tone: .info
+            )
+        }
+
+        // 保持"数据处理"面板收起状态。
+        if appState.isStackProcessorPresented {
+            appState.isStackProcessorPresented = false
+        }
+        // 同步草稿与面板状态，避免下一次手动拆分残留旧文本。
+        appState.stackProcessorDraft = ""
         updateAuxiliaryPanelPresentation()
     }
 
@@ -1292,22 +1382,33 @@ final class AppServices: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: workItem)
     }
 
+    private enum UpdateCheckTrigger {
+        /// 用户在设置面板手动点击「立即检查」。每次都需要给用户明确反馈，
+        /// 命中更新时绕过版本去重直接弹窗，未命中或失败也用 transient
+        /// notice 在设置面板内告知结果。
+        case manual
+        /// 应用启动时按 `updateCheckFrequency` 触发的后台检查（每次启动 /
+        /// 每周）。未命中更新或失败时全部静默；命中更新走 NSAlert 弹窗，
+        /// 确保即使设置面板没打开用户也能看到。
+        case scheduled
+    }
+
     func checkForUpdates() async {
-        await performUpdateCheck(silentWhenUpToDate: false)
+        await performUpdateCheck(trigger: .manual)
     }
 
     private func performScheduledUpdateCheck() async {
-        await performUpdateCheck(silentWhenUpToDate: true)
+        await performUpdateCheck(trigger: .scheduled)
     }
 
-    private func performUpdateCheck(silentWhenUpToDate: Bool) async {
+    private func performUpdateCheck(trigger: UpdateCheckTrigger) async {
         let result = await updateCheckService.checkForUpdates()
         switch result {
         case .upToDate:
             appState.updateSettings { settings in
                 settings.lastUpdateCheckDate = Date()
             }
-            if !silentWhenUpToDate {
+            if trigger == .manual {
                 showTransientNotice(
                     AppLocalization.localized("Edge Clip 已是最新版本。"),
                     tone: .info,
@@ -1318,19 +1419,74 @@ final class AppServices: ObservableObject {
             appState.updateSettings { settings in
                 settings.lastUpdateCheckDate = Date()
             }
-            showTransientNotice(
-                AppLocalization.localized("发现新版本 v\(info.version)：\(info.releaseNotes)"),
-                tone: .info,
-                duration: 6
-            )
+
+            // 计划性检查：同一个版本在本次进程生命周期内只弹一次，避免
+            // 「每次启动」策略下反复打扰已经看过提示的用户。手动检查
+            // 始终弹窗，透传用户主动操作的意图。
+            if trigger == .scheduled, lastPromptedUpdateVersion == info.version {
+                return
+            }
+
+            presentUpdateAvailableAlert(info: info)
         case .failed:
-            if !silentWhenUpToDate {
+            if trigger == .manual {
                 showTransientNotice(
                     AppLocalization.localized("检查更新失败，请稍后重试。"),
                     tone: .warning,
                     duration: 3
                 )
             }
+        }
+    }
+
+    /// 用 NSAlert 弹出「发现新版本」对话框，提供「立即下载 / 稍后提醒」两个
+    /// 按钮。选择 NSAlert 而不是 SwiftUI sheet / transient notice 的原因：
+    ///
+    /// 1. 不依赖任何 SwiftUI 窗口是否已挂载。开机自启时设置面板和剪贴
+    ///    面板都隐藏，原来的 transient notice 写到 `appState.transientNotice`
+    ///    后只在 `NoticeOverlayView` 渲染时才显示，用户根本看不到。
+    /// 2. NSAlert 会自动把应用带到前台、聚焦弹窗，强制用户做一次明确的
+    ///    选择，这对"新版本可用"这类需要决策的事件是合适的视觉层级。
+    /// 3. 选择「立即下载」直接走 `NSWorkspace.shared.open(downloadURL)`，
+    ///    用浏览器打开下载链接，把后续动作交给用户。
+    private func presentUpdateAvailableAlert(info: UpdateInfo) {
+        // 防止短时间内被并发触发多次（比如 startup scheduled check 还在
+        // 弹窗时用户又点了「立即检查」），避免叠多个 modal。
+        guard !isUpdateAvailableAlertPresented else { return }
+        isUpdateAvailableAlertPresented = true
+        defer { isUpdateAvailableAlertPresented = false }
+
+        lastPromptedUpdateVersion = info.version
+
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = AppLocalization.localized("发现新版本") + " v\(info.version)"
+        let trimmedReleaseNotes = info.releaseNotes
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        alert.informativeText = trimmedReleaseNotes.isEmpty
+            ? AppLocalization.localized("暂无更新说明。")
+            : trimmedReleaseNotes
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: AppLocalization.localized("立即下载"))
+        alert.addButton(withTitle: AppLocalization.localized("稍后提醒"))
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        let trimmedURLString = info.downloadURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // 仅允许 https scheme，作为对远端更新接口被劫持/污染时的纵深防御，
+        // 防止 NSWorkspace.open 触发 file:// 或第三方自定义 scheme。
+        guard let downloadURL = URL(string: trimmedURLString),
+              downloadURL.scheme?.lowercased() == "https",
+              NSWorkspace.shared.open(downloadURL) else {
+            showTransientNotice(
+                AppLocalization.localized("无法打开下载链接，请检查网络后重试。"),
+                tone: .warning,
+                duration: 4
+            )
+            return
         }
     }
 
@@ -4798,17 +4954,29 @@ final class AppServices: ObservableObject {
     @discardableResult
     private func synchronizeAccessibilityPermissionState() -> Bool {
         let isGranted = PermissionCenter.isAccessibilityGranted()
-        let shouldDisableRightMouseInteraction = !isGranted && appState.settings.rightMouseDragActivationEnabled
-
+        let previousGranted = appState.permissionGranted
         appState.permissionGranted = isGranted
 
-        guard shouldDisableRightMouseInteraction else {
-            return isGranted
+        // 关键约束：永远不要根据 AXIsProcessTrusted() 的瞬时结果修改用户的
+        // `rightMouseDragActivationEnabled` 设置。
+        //
+        // 历史 bug：旧逻辑会在检测到 !isGranted 时把开关直接关掉并写回
+        // UserDefaults。覆盖安装时即使官方签名 + 公证使得权限实际并未丢失，
+        // AXIsProcessTrusted() 也可能在启动早期（TCC 数据库尚未完成对新
+        // binary 校验时）瞬时返回 false，这一刻就会把用户的偏好洗成关闭，
+        // 表现为「每次覆盖安装后『按住右键滑出』都自动关闭」。
+        //
+        // 运行时安全已经由 `applyRightMouseDragGestureSetting()` 自带的
+        // 两层 guard（开关 + 权限）保证：开关开着但权限不足时手势监听器根本
+        // 不会启动，因此这里不需要再去清掉开关。
+        //
+        // 但权限状态发生 true ↔ false 翻转时，需要主动重跑一次手势配置，
+        // 让监听器跟随当前权限启动 / 停止，避免出现"权限丢了但监听器还在"
+        // 或"权限恢复了但监听器没起来"的状态。
+        if previousGranted != isGranted, appState.settings.rightMouseDragActivationEnabled {
+            applyRightMouseDragGestureSetting()
         }
 
-        appState.updateSettings { settings in
-            settings.rightMouseDragActivationEnabled = false
-        }
         return isGranted
     }
 

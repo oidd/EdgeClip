@@ -27,7 +27,7 @@ private enum StackGlyphMetrics {
     }
 }
 
-private enum StackGlyphSymbolResolver {
+enum StackGlyphSymbolResolver {
     static let symbolName: String = {
         let candidates = [
             "square.3.layers.3d.down.forward",

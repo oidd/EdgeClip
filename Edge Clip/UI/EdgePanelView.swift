@@ -1270,6 +1270,9 @@ struct EdgePanelView: View {
             isFavorited: services.isItemFavorited(item),
             isHovered: activeRowHighlightID == item.id || draggedFavoriteEntryKey == .historyItem(item.id),
             actionsVisible: activeRowHighlightID == item.id && !appState.isRightDragSelecting && draggedFavoriteEntryKey == nil,
+            showsOpenAsStackAction: item.kind == .text
+                && !item.hasTruncatedTextPreview
+                && (appState.activeTab == .all || appState.activeTab == .text),
             showsFavoriteMoveToTopAction: appState.activeTab == .favorites && item.isFavorite && isFavoriteEntryReorderEnabled && index > 0,
             showsFavoriteReorderHandle: isFavoriteEntryReorderEnabled && item.isFavorite,
             isFavoriteReorderHandleVisible: (isFavoriteEntryReorderEnabled && item.isFavorite) && (activeRowHighlightID == item.id || draggedFavoriteEntryKey == .historyItem(item.id)),
@@ -2672,6 +2675,7 @@ private struct HistoryRowView: View, Equatable {
     let isFavorited: Bool
     let isHovered: Bool
     let actionsVisible: Bool
+    let showsOpenAsStackAction: Bool
     let showsFavoriteMoveToTopAction: Bool
     let showsFavoriteReorderHandle: Bool
     let isFavoriteReorderHandleVisible: Bool
@@ -2695,6 +2699,7 @@ private struct HistoryRowView: View, Equatable {
         lhs.isFavorited == rhs.isFavorited &&
         lhs.isHovered == rhs.isHovered &&
         lhs.actionsVisible == rhs.actionsVisible &&
+        lhs.showsOpenAsStackAction == rhs.showsOpenAsStackAction &&
         lhs.showsFavoriteMoveToTopAction == rhs.showsFavoriteMoveToTopAction &&
         lhs.showsFavoriteReorderHandle == rhs.showsFavoriteReorderHandle &&
         lhs.isFavoriteReorderHandleVisible == rhs.isFavoriteReorderHandleVisible &&
@@ -3120,6 +3125,9 @@ private struct HistoryRowView: View, Equatable {
             items.append((localized("访问"), "arrow.up.right.square", .secondary))
         }
         items.append((localized(isFavorited ? "已收藏" : "收藏"), isFavorited ? "star.fill" : "star", .secondary))
+        if showsOpenAsStackAction {
+            items.append((localized("堆栈"), StackGlyphSymbolResolver.symbolName, .secondary))
+        }
         items.append((localized("删除"), "trash", .red))
         return PanelRowActionsGroup.requiredWidth(for: items)
     }
@@ -3138,6 +3146,11 @@ private struct HistoryRowView: View, Equatable {
         items.append(.init(title: localized(isFavorited ? "已收藏" : "收藏"), symbol: isFavorited ? "star.fill" : "star") {
             services.toggleFavorite(for: item.id)
         })
+        if showsOpenAsStackAction {
+            items.append(.init(title: localized("堆栈"), symbol: StackGlyphSymbolResolver.symbolName) {
+                services.openNewStackSession(fromTextItem: item)
+            })
+        }
         items.append(.init(title: localized("删除"), symbol: "trash", tint: .red) {
             appState.remove(itemID: item.id)
         })

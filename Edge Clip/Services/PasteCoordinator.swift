@@ -105,6 +105,11 @@ final class PasteCoordinator {
     private let fileManager = FileManager.default
     private var activePasteboardDataProviders: [NSObject] = []
 
+    static let pasteStagingRoot: URL = {
+        URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("EdgeClipPasteStaging", isDirectory: true)
+    }()
+
     enum PasteResult {
         case autoPasted
         case copiedOnly
@@ -295,8 +300,8 @@ final class PasteCoordinator {
                 return .failed(AppLocalization.localized("图片资源不存在，无法写回剪切板"))
             }
 
-            let stagedImageURL = fileURL.flatMap { stageFileURLsForPaste([$0])?.first }
             pasteboard.clearContents()
+            let stagedImageURL = fileURL.flatMap { stageFileURLsForPaste([$0])?.first }
             guard writeImage(image, originalFileURL: fileURL, stagedFileURL: stagedImageURL, to: pasteboard) else {
                 return .failed(AppLocalization.localized("无法写入图片到系统剪切板"))
             }
@@ -310,10 +315,10 @@ final class PasteCoordinator {
             }
 
             defer { resolved.stopAccess() }
+            pasteboard.clearContents()
             guard let stagedURLs = stageFileURLsForPaste(urls), !stagedURLs.isEmpty else {
                 return .failed(AppLocalization.localized("无法为文件创建可共享副本（文件权限可能已失效，请重新复制该文件）"))
             }
-            pasteboard.clearContents()
             guard writeFileURLs(stagedURLs, to: pasteboard) else {
                 return .failed(AppLocalization.localized("无法写入文件到系统剪切板（文件访问权限可能已失效，请重新复制该文件）"))
             }
@@ -407,10 +412,11 @@ final class PasteCoordinator {
         guard !urls.isEmpty else { return nil }
 
         do {
-            let pasteStagingDirectory = makeFreshPasteStagingDirectory()
-            if fileManager.fileExists(atPath: pasteStagingDirectory.path) {
-                try fileManager.removeItem(at: pasteStagingDirectory)
+            if fileManager.fileExists(atPath: Self.pasteStagingRoot.path) {
+                try fileManager.removeItem(at: Self.pasteStagingRoot)
             }
+
+            let pasteStagingDirectory = Self.pasteStagingRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try fileManager.createDirectory(at: pasteStagingDirectory, withIntermediateDirectories: true)
 
             var stagedURLs: [URL] = []
@@ -434,7 +440,10 @@ final class PasteCoordinator {
 
     func canStageFileURLs(_ urls: [URL]) -> Bool {
         guard !urls.isEmpty else { return false }
-        return stageFileURLsForPaste(urls) != nil
+        for url in urls {
+            guard fileManager.isReadableFile(atPath: url.path) else { return false }
+        }
+        return true
     }
 
     private func sanitizedFilename(for url: URL, fallbackIndex: Int) -> String {
@@ -462,12 +471,6 @@ final class PasteCoordinator {
             suffix += 1
         }
         return candidate
-    }
-
-    private func makeFreshPasteStagingDirectory() -> URL {
-        URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("EdgeClipPasteStaging", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
 
     private func makeLazyImagePasteboardDataProvider(for fileURL: URL) -> LazyImagePasteboardDataProvider? {

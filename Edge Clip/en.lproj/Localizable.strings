@@ -586,3 +586,13 @@
 "立即检查" = "Check Now";
 "Edge Clip 已是最新版本。" = "Edge Clip is up to date.";
 "检查更新失败，请稍后重试。" = "Update check failed. Please try again later.";
+"发现新版本" = "New Version Available";
+"立即下载" = "Download Now";
+"稍后提醒" = "Remind Me Later";
+"无法打开下载链接，请检查网络后重试。" = "Cannot open the download link. Please check your network and try again.";
+"暂无更新说明。" = "No release notes available.";
+
+/* Stack auto split */
+"自动拆分" = "Auto Split";
+"在文字的历史记录或者预览面板中点击“堆栈”，自动以此规则做首次拆分。" = "When you click \"Stack\" in a text history row or the preview panel, automatically apply this rule for the first split.";
+"已按规则拆分并插入到堆栈顶部。" = "Split into items and inserted at the top of the stack.";

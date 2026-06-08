@@ -29,20 +29,22 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         }
     }
 
+    /// 返回 Asset Catalog 中的 imageset 名称。对应的图像设置为 template
+    /// rendering，因此可被外层的 `foregroundStyle` 着色。
     var icon: String {
         switch self {
         case .interaction:
-            return "cursorarrow.motionlines"
+            return "SettingsInteractionIcon"
         case .preferences:
-            return "slider.horizontal.below.rectangle"
+            return "SettingsPreferencesIcon"
         case .panel:
-            return "rectangle.grid.1x2"
+            return "SettingsPanelIcon"
         case .general:
-            return "switch.2"
+            return "SettingsGeneralIcon"
         case .blacklist:
-            return "hand.raised"
+            return "SettingsBlacklistIcon"
         case .about:
-            return "info.circle"
+            return "SettingsAboutIcon"
         }
     }
 }
@@ -941,6 +943,7 @@ struct SettingsView: View {
                 titleFont: .title2.weight(.bold)
             ) {
                 VStack(alignment: .leading, spacing: 18) {
+                    stackAutoSplitConfigurator
                     stackEntryIllustration
                     stackGuideDisclosure
                 }
@@ -1087,11 +1090,13 @@ struct SettingsView: View {
                 contentTopSpacing: 0,
                 headerAccessory: {
                     HStack(spacing: 6) {
+                        // 按钮使用 regular 控件尺寸，与右侧 Picker 默认尺寸
+                        // 一致；之前 `.controlSize(.small)` 让按钮明显矮小一截，
+                        // 与下拉框无法对齐。
                         Button(localized("立即检查")) {
                             Task { await services.checkForUpdates() }
                         }
                         .buttonStyle(.bordered)
-                        .controlSize(.small)
                         .fixedSize()
 
                         Picker("", selection: settingsBinding(\.updateCheckFrequency)) {
@@ -2598,6 +2603,52 @@ struct SettingsView: View {
                 stackSpotlightPanel(for: .preview)
             }
         }
+    }
+
+    private var stackAutoSplitConfigurator: some View {
+        let isCustom = appState.settings.stackAutoSplitDelimiter == .custom
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(localized("自动拆分"))
+
+                Spacer(minLength: 12)
+
+                Picker("", selection: settingsBinding(\.stackAutoSplitDelimiter)) {
+                    ForEach(StackDelimiterOption.allCases, id: \.self) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: historyLimitAccessoryWidth, alignment: .trailing)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(localized("在文字的历史记录或者预览面板中点击“堆栈”，自动以此规则做首次拆分。"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if isCustom {
+                    TextField(
+                        localized("输入自定义符号"),
+                        text: Binding(
+                            get: { appState.settings.stackAutoSplitCustomDelimiter },
+                            set: { newValue in
+                                appState.updateSettings { settings in
+                                    settings.stackAutoSplitCustomDelimiter = newValue
+                                }
+                            }
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: historyLimitAccessoryWidth, alignment: .trailing)
+                }
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     private func stackSpotlightPanel(for variant: StackSpotlightVariant) -> some View {

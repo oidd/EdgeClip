@@ -762,6 +762,8 @@ struct AppSettings: Codable {
     var panelReplaceableTabs: [PanelTab] = PanelTab.defaultReplaceableSlots
     var panelTabSwitchMode: PanelTabSwitchMode = .hover
     var pinnedPanelIdleTransparencyPercent: Int = 35
+    var stackAutoSplitDelimiter: StackDelimiterOption = .newline
+    var stackAutoSplitCustomDelimiter: String = ""
 
     var globalHotkeyEnabled: Bool = true
     var hotkeyTriggerMode: GlobalHotkeyTriggerMode = .doubleModifier
@@ -818,6 +820,8 @@ struct AppSettings: Codable {
         case panelReplaceableTabs
         case panelTabSwitchMode
         case pinnedPanelIdleTransparencyPercent
+        case stackAutoSplitDelimiter
+        case stackAutoSplitCustomDelimiter
         case enabledPanelTabs
         case globalHotkeyEnabled
         case hotkeyTriggerMode
@@ -898,6 +902,8 @@ struct AppSettings: Codable {
                 try container.decodeIfPresent(Int.self, forKey: .pinnedPanelIdleTransparencyPercent) ?? 35
             )
         )
+        stackAutoSplitDelimiter = try container.decodeIfPresent(StackDelimiterOption.self, forKey: .stackAutoSplitDelimiter) ?? .newline
+        stackAutoSplitCustomDelimiter = try container.decodeIfPresent(String.self, forKey: .stackAutoSplitCustomDelimiter) ?? ""
 
         globalHotkeyEnabled = try container.decodeIfPresent(Bool.self, forKey: .globalHotkeyEnabled) ?? true
         hotkeyTriggerMode = try container.decodeIfPresent(GlobalHotkeyTriggerMode.self, forKey: .hotkeyTriggerMode) ?? .doubleModifier
@@ -980,6 +986,8 @@ struct AppSettings: Codable {
         try container.encode(PanelTab.sanitizedReplaceableSlots(from: panelReplaceableTabs), forKey: .panelReplaceableTabs)
         try container.encode(panelTabSwitchMode, forKey: .panelTabSwitchMode)
         try container.encode(pinnedPanelIdleTransparencyPercent, forKey: .pinnedPanelIdleTransparencyPercent)
+        try container.encode(stackAutoSplitDelimiter, forKey: .stackAutoSplitDelimiter)
+        try container.encode(stackAutoSplitCustomDelimiter, forKey: .stackAutoSplitCustomDelimiter)
         try container.encode(globalHotkeyEnabled, forKey: .globalHotkeyEnabled)
         try container.encode(hotkeyTriggerMode, forKey: .hotkeyTriggerMode)
         try container.encode(hotkeyPanelModifier, forKey: .hotkeyPanelModifier)
